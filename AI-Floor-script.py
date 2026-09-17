@@ -34,14 +34,19 @@ uiapp = __revit__
 app = uiapp.Application
 
 MAX_HEAL_GAP = 1.0 / 12.0  # 1 inch, in feet (Revit's internal length unit)
+MIN_CURVE_LENGTH = 1.0 / 24.0  # 1/2 inch - drop near-zero-length segments (e.g. curtain wall mullion artifacts)
 
 
 def heal_curve_loop(curves):
-    """Room boundary segments (especially on curved walls or where they meet room
-    separation lines) can leave tiny gaps between consecutive curve endpoints, which
-    CurveLoop.Create rejects as "not contiguous". Nudge each curve's start point to the
-    previous curve's actual end point when the gap is small; larger, genuine gaps are
-    left alone so an actually-open boundary still fails instead of being papered over."""
+    """Room boundary segments (especially on curved/curtain walls, or where they meet
+    room separation lines) can include near-zero-length segments (e.g. at curtain wall
+    mullions) and leave tiny gaps between consecutive curve endpoints, both of which
+    CurveLoop.Create rejects - the former as degenerate geometry, the latter as "not
+    contiguous". Drop the degenerate segments, then nudge each remaining curve's start
+    point to the previous curve's actual end point when the gap is small; larger,
+    genuine gaps are left alone so an actually-open boundary still fails instead of
+    being papered over."""
+    curves = [c for c in curves if c.Length > MIN_CURVE_LENGTH]
     healed = []
     for curve in curves:
         if healed:
