@@ -188,15 +188,55 @@ def force_close_loop(curves):
     return closed
 
 
-def build_curve_loop(doc, boundary_segments):
-    """Builds the profile curve loop for a Floor from a room boundary loop, trying three
-    tiers in order of preference and falling through on failure - so a fix aimed at one
-    room's geometry can't regress a simpler room that never needed it:
+def get_room_footprint_loop(doc, room, boundary_options):
+    """Uses Revit's own internal room-boundary geometry engine (SpatialElementGeometry
+    Calculator - the same machinery Revit uses to compute the room's area/volume and
+    draw its colored region in plan) to get an already-closed, already-valid curve loop
+    for the room's footprint, instead of manually stitching one together from
+    GetBoundarySegments(). These curves are plain, dereferenced geometry with no link
+    back to any hosting wall, which sidesteps the gap/contiguity issues and the wall
+    auto-association issue at the source rather than working around them. Returns None
+    if no usable bottom face is found (falls through to the segment-based tiers)."""
+    calculator = Autodesk.Revit.DB.SpatialElementGeometryCalculator(doc, boundary_options)
+    results = calculator.CalculateSpatialElementGeometry(room)
+    solid = results.GetGeometry()
+    bottom_face = None
+    bottom_z = None
+    for face in solid.Faces:
+        normal = face.ComputeNormal(Autodesk.Revit.DB.UV(0.5, 0.5))
+        if normal.Z < -0.9:
+            bbox = face.GetBoundingBox()
+            mid = Autodesk.Revit.DB.UV((bbox.Min.U + bbox.Max.U) / 2.0, (bbox.Min.V + bbox.Max.V) / 2.0)
+            z = face.Evaluate(mid).Z
+            if bottom_z is None or z < bottom_z:
+                bottom_face = face
+                bottom_z = z
+    if bottom_face is None:
+        return None
+    loops = list(bottom_face.GetEdgesAsCurveLoops())
+    if not loops:
+        return None
+    return max(loops, key=loop_area_xy)
+
+
+def build_curve_loop(doc, room, boundary_segments, boundary_options):
+    """Builds the profile curve loop for a Floor from a room, trying multiple tiers in
+    order of preference and falling through on failure - so a fix aimed at one room's
+    geometry can't regress a simpler room that never needed it:
+    0. The room's own bottom face from SpatialElementGeometryCalculator (see
+       get_room_footprint_loop) - the most direct and robust source.
     1. Curtain-wall Location Curve substitution + small-gap healing + a small inset off
        bounding walls (aimed at "circular chain of references" / "not contiguous").
     2. Plain per-segment boundary curves + small-gap healing only.
     3. Force-closing any remaining gap with a straight connector (last resort).
     Returns (curve_loop, was_force_closed)."""
+    try:
+        loop = get_room_footprint_loop(doc, room, boundary_options)
+        if loop is not None:
+            return loop, False
+    except Exception:
+        pass
+
     try:
         curves = heal_curve_loop(build_boundary_curves(doc, boundary_segments))
         loop = Autodesk.Revit.DB.CurveLoop.Create(to_curve_list(curves))
@@ -274,7 +314,8 @@ def main():
                 room_name, room_number))
             return None
 
-        floor_curves_loop, was_force_closed = build_curve_loop(doc, all_boundaries[0])
+        floor_curves_loop, was_force_closed = build_curve_loop(
+            doc, room, all_boundaries[0], room_boundary_options)
         if was_force_closed:
             print("Warning: room '{}' {} had an open boundary - force-closed it with a "
                   "straight edge, please double check the floor's shape there".format(
