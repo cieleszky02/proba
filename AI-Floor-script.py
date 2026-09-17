@@ -38,6 +38,26 @@ MIN_CURVE_LENGTH = 1.0 / 24.0  # 1/2 inch - drop near-zero-length segments (e.g.
 EDGE_INSET = 1.0 / 96.0  # 1/8 inch - nudge the floor edge off any wall it would otherwise sit exactly on
 
 
+class SkipOnErrorPreprocessor(IFailuresPreprocessor):
+    """Rolls the current transaction back automatically instead of showing Revit's
+    interactive "cannot be ignored" error dialog (e.g. the "circular chain of
+    references" error some curtain-wall-bounded rooms trigger), so a batch of rooms can
+    run unattended and a problematic room is simply skipped and reported instead of
+    blocking on a popup."""
+    def PreprocessFailures(self, failures_accessor):
+        for failure in failures_accessor.GetFailureMessages():
+            if failure.GetSeverity() == FailureSeverity.Error:
+                return FailureProcessingResult.ProceedWithRollBack
+        return FailureProcessingResult.Continue
+
+
+def to_curve_list(curves):
+    curve_list = List[Autodesk.Revit.DB.Curve]()
+    for curve in curves:
+        curve_list.Add(curve)
+    return curve_list
+
+
 def loop_area_xy(curve_loop):
     points = []
     for curve in curve_loop:
@@ -137,6 +157,23 @@ def build_boundary_curves(doc, boundary_segments):
     return curves
 
 
+def build_curve_loop(doc, boundary_segments):
+    """Builds the profile curve loop for a Floor from a room boundary loop. Prefers
+    curtain-wall Location Curve substitution, gap healing, and a small inset off
+    bounding walls (aimed at the "circular chain of references" and "not contiguous"
+    errors seen on curved/curtain-wall-bounded rooms), but falls back to the plain
+    per-segment boundary curves if that enhanced pipeline fails to produce a usable
+    loop - so a fix aimed at one room's geometry can't regress a different, simpler
+    room that never needed it."""
+    try:
+        curves = heal_curve_loop(build_boundary_curves(doc, boundary_segments))
+        loop = Autodesk.Revit.DB.CurveLoop.Create(to_curve_list(curves))
+        return inset_curve_loop(loop, EDGE_INSET)
+    except Exception:
+        curves = [segment.GetCurve().Clone() for segment in boundary_segments]
+        return Autodesk.Revit.DB.CurveLoop.Create(to_curve_list(curves))
+
+
 def main():
     # Select rooms
     selobject = get_selection_basic(uidoc, CustomISelectionFilterByIdInclude(ID_ROOMS))
@@ -197,12 +234,7 @@ def main():
                 room_name, room_number))
             return None
 
-        raw_curves = build_boundary_curves(doc, all_boundaries[0])
-        floor_curves = List[Autodesk.Revit.DB.Curve]()
-        for curve in heal_curve_loop(raw_curves):
-            floor_curves.Add(curve)
-        floor_curves_loop = Autodesk.Revit.DB.CurveLoop.Create(floor_curves)
-        floor_curves_loop = inset_curve_loop(floor_curves_loop, EDGE_INSET)
+        floor_curves_loop = build_curve_loop(doc, all_boundaries[0])
         curve_loops = List[Autodesk.Revit.DB.CurveLoop]()
         curve_loops.Add(floor_curves_loop)
 
@@ -231,20 +263,30 @@ def main():
     skipped_rooms = 0
     try:
         for room in selected_rooms:
+            room_label = "'{}' {}".format(
+                room.get_Parameter(BuiltInParameter.ROOM_NAME).AsString(), room.Number)
             t = Autodesk.Revit.DB.Transaction(doc, 'Create Floor Finishing')
             t.Start()
+            failure_options = t.GetFailureHandlingOptions()
+            failure_options.SetFailuresPreprocessor(SkipOnErrorPreprocessor())
+            t.SetFailureHandlingOptions(failure_options)
             try:
                 new_floor = make_floor(room)
                 if new_floor is None:
                     skipped_rooms += 1
-                    t.RollBack()
+                    if not t.HasEnded():
+                        t.RollBack()
                 else:
-                    t.Commit()
+                    status = t.Commit()
+                    if status != Autodesk.Revit.DB.TransactionStatus.Committed:
+                        skipped_rooms += 1
+                        print("Failed to create floor for room {}: transaction {}".format(
+                            room_label, status))
             except Exception as ex:
-                t.RollBack()
+                if not t.HasEnded():
+                    t.RollBack()
                 skipped_rooms += 1
-                print("Failed to create floor for room '{}' {}: {}".format(
-                    room.get_Parameter(BuiltInParameter.ROOM_NAME).AsString(), room.Number, ex))
+                print("Failed to create floor for room {}: {}".format(room_label, ex))
         tg.Assimilate()
     except Exception:
         tg.RollBack()
