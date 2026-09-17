@@ -33,6 +33,39 @@ uidoc = __revit__.ActiveUIDocument
 uiapp = __revit__
 app = uiapp.Application
 
+MAX_HEAL_GAP = 1.0 / 12.0  # 1 inch, in feet (Revit's internal length unit)
+
+
+def heal_curve_loop(curves):
+    """Room boundary segments (especially on curved walls or where they meet room
+    separation lines) can leave tiny gaps between consecutive curve endpoints, which
+    CurveLoop.Create rejects as "not contiguous". Nudge each curve's start point to the
+    previous curve's actual end point when the gap is small; larger, genuine gaps are
+    left alone so an actually-open boundary still fails instead of being papered over."""
+    healed = []
+    for curve in curves:
+        if healed:
+            prev_end = healed[-1].GetEndPoint(1)
+            gap = prev_end.DistanceTo(curve.GetEndPoint(0))
+            if 0 < gap <= MAX_HEAL_GAP:
+                end = curve.GetEndPoint(1)
+                if isinstance(curve, Line):
+                    curve = Line.CreateBound(prev_end, end)
+                elif isinstance(curve, Arc):
+                    curve = Arc.Create(prev_end, end, curve.Evaluate(0.5, True))
+        healed.append(curve)
+    if len(healed) > 1:
+        loop_start = healed[0].GetEndPoint(0)
+        last = healed[-1]
+        gap = last.GetEndPoint(1).DistanceTo(loop_start)
+        if 0 < gap <= MAX_HEAL_GAP:
+            last_start = last.GetEndPoint(0)
+            if isinstance(last, Line):
+                healed[-1] = Line.CreateBound(last_start, loop_start)
+            elif isinstance(last, Arc):
+                healed[-1] = Arc.Create(last_start, loop_start, last.Evaluate(0.5, True))
+    return healed
+
 
 def main():
     # Select rooms
@@ -94,9 +127,10 @@ def main():
                 room_name, room_number))
             return None
 
+        raw_curves = [segment.GetCurve().Clone() for segment in all_boundaries[0]]
         floor_curves = List[Autodesk.Revit.DB.Curve]()
-        for boundary_segment in all_boundaries[0]:
-            floor_curves.Add(boundary_segment.GetCurve().Clone())
+        for curve in heal_curve_loop(raw_curves):
+            floor_curves.Add(curve)
         floor_curves_loop = Autodesk.Revit.DB.CurveLoop.Create(floor_curves)
         curve_loops = List[Autodesk.Revit.DB.CurveLoop]()
         curve_loops.Add(floor_curves_loop)
