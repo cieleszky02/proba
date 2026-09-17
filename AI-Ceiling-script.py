@@ -32,6 +32,44 @@ app = uiapp.Application
 
 MAX_HEAL_GAP = 1.0 / 12.0  # 1 inch, in feet (Revit's internal length unit)
 MIN_CURVE_LENGTH = 1.0 / 24.0  # 1/2 inch - drop near-zero-length segments (e.g. curtain wall mullion artifacts)
+EDGE_INSET = 1.0 / 96.0  # 1/8 inch - nudge the ceiling edge off any wall it would otherwise sit exactly on
+
+
+def loop_area_xy(curve_loop):
+    points = []
+    for curve in curve_loop:
+        points.extend(curve.Tessellate())
+    area = 0.0
+    for i in range(len(points)):
+        p1 = points[i]
+        p2 = points[(i + 1) % len(points)]
+        area += p1.X * p2.Y - p2.X * p1.Y
+    return abs(area) / 2.0
+
+
+def inset_curve_loop(curve_loop, inset):
+    """Revit can try to auto-associate a new Floor's/Ceiling's sketch edges with a wall
+    they land exactly on - particularly problematic for curtain walls, whose internal
+    grid/panel/mullion hierarchy already has its own reference chain - which can trigger
+    a "circular chain of references" regeneration error regardless of which Curve object
+    was used to build the edge, since it's driven by the edge's geometric position, not
+    its data provenance. Nudge the loop inward by a small, visually negligible amount so
+    its edges are no longer exactly coincident with any bounding wall. Tries both offset
+    directions (loop winding isn't guaranteed) and keeps whichever shrinks the area."""
+    original_area = loop_area_xy(curve_loop)
+    best = curve_loop
+    best_area = original_area
+    for offset in (inset, -inset):
+        try:
+            candidate = Autodesk.Revit.DB.CurveLoop.CreateViaOffset(
+                curve_loop, offset, Autodesk.Revit.DB.XYZ.BasisZ)
+            candidate_area = loop_area_xy(candidate)
+            if candidate_area < best_area:
+                best = candidate
+                best_area = candidate_area
+        except Exception:
+            continue
+    return best
 
 
 def heal_curve_loop(curves):
@@ -164,6 +202,7 @@ def main():
         for curve in heal_curve_loop(raw_curves):
             ceiling_curves.Add(curve)
         ceiling_curves_loop = Autodesk.Revit.DB.CurveLoop.Create(ceiling_curves)
+        ceiling_curves_loop = inset_curve_loop(ceiling_curves_loop, EDGE_INSET)
         curve_loops = List[Autodesk.Revit.DB.CurveLoop]()
         curve_loops.Add(ceiling_curves_loop)
 
