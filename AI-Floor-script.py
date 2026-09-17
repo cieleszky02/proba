@@ -60,7 +60,10 @@ def main():
         forms.alert('No floor types found in the project', 'Create floor finishing')
         sys.exit()
 
-    floor_types_by_name = {ft.Name: ft for ft in floor_types}
+    floor_types_by_name = {
+        ft.get_Parameter(BuiltInParameter.ALL_MODEL_TYPE_NAME).AsString(): ft
+        for ft in floor_types
+    }
 
     switches = ['Consider Thickness']
     cfgs = {'Consider Thickness': {'background': '0xFF55FF'}}
@@ -82,7 +85,7 @@ def main():
         """Creates a Floor matching the room's footprint. Returns the new Floor,
         or None if the room has no usable boundary (unplaced/unenclosed room)."""
         room_offset = room.get_Parameter(BuiltInParameter.ROOM_LOWER_OFFSET).AsDouble()
-        room_name = room.Name
+        room_name = room.get_Parameter(BuiltInParameter.ROOM_NAME).AsString()
         room_number = room.Number
 
         all_boundaries = room.GetBoundarySegments(room_boundary_options)
@@ -136,7 +139,7 @@ def main():
                 t.RollBack()
                 skipped_rooms += 1
                 print("Failed to create floor for room '{}' {}: {}".format(
-                    room.Name, room.Number, ex))
+                    room.get_Parameter(BuiltInParameter.ROOM_NAME).AsString(), room.Number, ex))
         tg.Assimilate()
     except Exception:
         tg.RollBack()
