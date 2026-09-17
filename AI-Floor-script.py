@@ -72,6 +72,33 @@ def heal_curve_loop(curves):
     return healed
 
 
+def build_boundary_curves(doc, boundary_segments):
+    """Room boundary segments hosted by a curtain wall are reported as a jagged,
+    panel-by-panel approximation of the wall's face rather than one clean curve -
+    curtain walls don't have a simple planar face the way basic walls do. That
+    approximation is what triggers Revit's "circular chain of references" error when
+    it's reused to build a new Floor/Ceiling, since Revit tries to auto-associate the
+    new sketch edges with the curtain wall's own grid/panel/mullion hierarchy. Where
+    consecutive segments are hosted by the same curtain wall, collapse them into a
+    single curve using that wall's own Location Curve instead; every other segment
+    uses its normal boundary curve unchanged."""
+    curves = []
+    last_curtain_wall_id = None
+    for segment in boundary_segments:
+        element = doc.GetElement(segment.ElementId)
+        if isinstance(element, Wall) and element.CurtainGrid is not None:
+            if element.Id == last_curtain_wall_id:
+                continue  # already represented by this wall's location curve
+            location = element.Location
+            if isinstance(location, LocationCurve):
+                curves.append(location.Curve.Clone())
+                last_curtain_wall_id = element.Id
+                continue
+        curves.append(segment.GetCurve().Clone())
+        last_curtain_wall_id = None
+    return curves
+
+
 def main():
     # Select rooms
     selobject = get_selection_basic(uidoc, CustomISelectionFilterByIdInclude(ID_ROOMS))
@@ -132,7 +159,7 @@ def main():
                 room_name, room_number))
             return None
 
-        raw_curves = [segment.GetCurve().Clone() for segment in all_boundaries[0]]
+        raw_curves = build_boundary_curves(doc, all_boundaries[0])
         floor_curves = List[Autodesk.Revit.DB.Curve]()
         for curve in heal_curve_loop(raw_curves):
             floor_curves.Add(curve)
