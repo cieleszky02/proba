@@ -36,6 +36,7 @@ app = uiapp.Application
 MAX_HEAL_GAP = 1.0 / 12.0  # 1 inch, in feet (Revit's internal length unit)
 MIN_CURVE_LENGTH = 1.0 / 24.0  # 1/2 inch - drop near-zero-length segments (e.g. curtain wall mullion artifacts)
 EDGE_INSET = 1.0 / 96.0  # 1/8 inch - nudge the floor edge off any wall it would otherwise sit exactly on
+FORCE_CLOSE_MIN_GAP = 1.0 / 1000.0  # ~1/80 inch - anything smaller is treated as already touching
 
 
 class SkipOnErrorPreprocessor(IFailuresPreprocessor):
@@ -157,21 +158,51 @@ def build_boundary_curves(doc, boundary_segments):
     return curves
 
 
+def force_close_loop(curves):
+    """Last-resort fallback: bridges any remaining gap between consecutive curves with a
+    straight connector line, guaranteeing CurveLoop.Create succeeds. Unlike
+    heal_curve_loop, this never adjusts an existing curve's endpoints - it only inserts
+    new connector segments - so it can safely close a gap of any size without distorting
+    the rest of the shape. That's also its risk: if the room genuinely isn't enclosed at
+    that point, this draws a straight edge across the gap instead of failing, so a room
+    fixed this way is worth a visual double check."""
+    closed = []
+    count = len(curves)
+    for i in range(count):
+        curve = curves[i]
+        closed.append(curve)
+        next_curve = curves[(i + 1) % count]
+        gap_start = curve.GetEndPoint(1)
+        gap_end = next_curve.GetEndPoint(0)
+        if gap_start.DistanceTo(gap_end) > FORCE_CLOSE_MIN_GAP:
+            closed.append(Line.CreateBound(gap_start, gap_end))
+    return closed
+
+
 def build_curve_loop(doc, boundary_segments):
-    """Builds the profile curve loop for a Floor from a room boundary loop. Prefers
-    curtain-wall Location Curve substitution, gap healing, and a small inset off
-    bounding walls (aimed at the "circular chain of references" and "not contiguous"
-    errors seen on curved/curtain-wall-bounded rooms), but falls back to the plain
-    per-segment boundary curves if that enhanced pipeline fails to produce a usable
-    loop - so a fix aimed at one room's geometry can't regress a different, simpler
-    room that never needed it."""
+    """Builds the profile curve loop for a Floor from a room boundary loop, trying three
+    tiers in order of preference and falling through on failure - so a fix aimed at one
+    room's geometry can't regress a simpler room that never needed it:
+    1. Curtain-wall Location Curve substitution + small-gap healing + a small inset off
+       bounding walls (aimed at "circular chain of references" / "not contiguous").
+    2. Plain per-segment boundary curves + small-gap healing only.
+    3. Force-closing any remaining gap with a straight connector (last resort).
+    Returns (curve_loop, was_force_closed)."""
     try:
         curves = heal_curve_loop(build_boundary_curves(doc, boundary_segments))
         loop = Autodesk.Revit.DB.CurveLoop.Create(to_curve_list(curves))
-        return inset_curve_loop(loop, EDGE_INSET)
+        return inset_curve_loop(loop, EDGE_INSET), False
     except Exception:
-        curves = [segment.GetCurve().Clone() for segment in boundary_segments]
-        return Autodesk.Revit.DB.CurveLoop.Create(to_curve_list(curves))
+        pass
+
+    try:
+        curves = heal_curve_loop([segment.GetCurve().Clone() for segment in boundary_segments])
+        return Autodesk.Revit.DB.CurveLoop.Create(to_curve_list(curves)), False
+    except Exception:
+        pass
+
+    curves = force_close_loop([segment.GetCurve().Clone() for segment in boundary_segments])
+    return Autodesk.Revit.DB.CurveLoop.Create(to_curve_list(curves)), True
 
 
 def main():
@@ -234,7 +265,11 @@ def main():
                 room_name, room_number))
             return None
 
-        floor_curves_loop = build_curve_loop(doc, all_boundaries[0])
+        floor_curves_loop, was_force_closed = build_curve_loop(doc, all_boundaries[0])
+        if was_force_closed:
+            print("Warning: room '{}' {} had an open boundary - force-closed it with a "
+                  "straight edge, please double check the floor's shape there".format(
+                      room_name, room_number))
         curve_loops = List[Autodesk.Revit.DB.CurveLoop]()
         curve_loops.Add(floor_curves_loop)
 
