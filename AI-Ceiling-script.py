@@ -34,6 +34,15 @@ MAX_HEAL_GAP = 1.0 / 12.0  # 1 inch, in feet (Revit's internal length unit)
 MIN_CURVE_LENGTH = 1.0 / 24.0  # 1/2 inch - drop near-zero-length segments (e.g. curtain wall mullion artifacts)
 EDGE_INSET = 1.0 / 96.0  # 1/8 inch - nudge the ceiling edge off any wall it would otherwise sit exactly on
 FORCE_CLOSE_MIN_GAP = 1.0 / 1000.0  # ~1/80 inch - anything smaller is treated as already touching
+CREATE_AWAY_OFFSET = Autodesk.Revit.DB.XYZ(2000.0, 2000.0, 0.0)  # feet - clear of real model geometry
+
+
+def translate_curve_loop(curve_loop, vector):
+    transform = Autodesk.Revit.DB.Transform.CreateTranslation(vector)
+    curves = List[Autodesk.Revit.DB.Curve]()
+    for curve in curve_loop:
+        curves.Add(curve.CreateTransformed(transform))
+    return Autodesk.Revit.DB.CurveLoop.Create(curves)
 
 
 class SkipOnErrorPreprocessor(IFailuresPreprocessor):
@@ -270,10 +279,17 @@ def main():
             print("Warning: room '{}' {} had an open boundary - force-closed it with a "
                   "straight edge, please double check the ceiling's shape there".format(
                       room_name, room_number))
+        # Build the ceiling far from the room's actual location, then move it back into
+        # place. Ceiling.Create appears to auto-associate a new sketch edge with whatever
+        # model geometry (e.g. a curtain wall) is already nearby at creation time, which
+        # is what triggers the "circular chain of references" error on some rooms;
+        # creating it with nothing nearby avoids that, and MoveElement doesn't re-run
+        # that association logic the way Ceiling.Create's own placement does.
         curve_loops = List[Autodesk.Revit.DB.CurveLoop]()
-        curve_loops.Add(ceiling_curves_loop)
+        curve_loops.Add(translate_curve_loop(ceiling_curves_loop, CREATE_AWAY_OFFSET))
 
         c = Autodesk.Revit.DB.Ceiling.Create(doc, curve_loops, ceiling_type.Id, room.LevelId)
+        Autodesk.Revit.DB.ElementTransformUtils.MoveElement(doc, c.Id, CREATE_AWAY_OFFSET.Negate())
 
         # Position the ceiling relative to the room's height (underside of the room)
         if not consider_thickness and is_compound_ceiling:
