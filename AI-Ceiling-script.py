@@ -42,7 +42,7 @@ def main():
     def make_opening(ceiling, boundary_segments):
         co_curves = Autodesk.Revit.DB.CurveArray()
         for segment in boundary_segments:
-            co_curves.Append(segment.GetCurve())
+            co_curves.Append(segment.GetCurve().Clone())
         doc.Create.NewOpening(ceiling, co_curves, False)
 
     # Get ceiling types
@@ -96,7 +96,7 @@ def main():
 
         ceiling_curves = List[Autodesk.Revit.DB.Curve]()
         for boundary_segment in all_boundaries[0]:
-            ceiling_curves.Add(boundary_segment.GetCurve())
+            ceiling_curves.Add(boundary_segment.GetCurve().Clone())
         ceiling_curves_loop = Autodesk.Revit.DB.CurveLoop.Create(ceiling_curves)
         curve_loops = List[Autodesk.Revit.DB.CurveLoop]()
         curve_loops.Add(ceiling_curves_loop)

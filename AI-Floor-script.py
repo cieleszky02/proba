@@ -45,7 +45,7 @@ def main():
     def make_opening(floor, boundary_segments):
         co_curves = Autodesk.Revit.DB.CurveArray()
         for segment in boundary_segments:
-            co_curves.Append(segment.GetCurve())
+            co_curves.Append(segment.GetCurve().Clone())
         doc.Create.NewOpening(floor, co_curves, False)
 
     # Get floor types
@@ -96,7 +96,7 @@ def main():
 
         floor_curves = List[Autodesk.Revit.DB.Curve]()
         for boundary_segment in all_boundaries[0]:
-            floor_curves.Add(boundary_segment.GetCurve())
+            floor_curves.Add(boundary_segment.GetCurve().Clone())
         floor_curves_loop = Autodesk.Revit.DB.CurveLoop.Create(floor_curves)
         curve_loops = List[Autodesk.Revit.DB.CurveLoop]()
         curve_loops.Add(floor_curves_loop)
