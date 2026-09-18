@@ -856,32 +856,18 @@ def _floor_plan_for_level(level):
     return None
 
 
-def group_plan_jobs_by_seed(plan_jobs):
-    """Combine every plan job for the same seed element (object) into one
-    group, so a column with plan connections on several sides gets a
-    single callout covering all of them instead of one each."""
-    groups = {}
-    order = []
-    for element_a, contact in plan_jobs:
-        key = str(element_a.Id)
-        if key not in groups:
-            groups[key] = (element_a, [])
-            order.append(key)
-        groups[key][1].append(contact)
-    return [groups[key] for key in order]
-
-
-def create_plan_callout(element_a, contacts):
-    """Create ONE Plan callout, on the existing Floor Plan view of the
-    connection's level, sized to cover element_a (the object) and every
-    partner element in `contacts` at once - all of that object's possible
-    horizontal/plan connections in a single view, not one callout per
-    partner. Must be called inside an open transaction. Returns
+def create_plan_callout(element_a, contact):
+    """Create a Plan callout, cropped around this one joint, on the
+    existing Floor Plan view of the connection's level - one callout per
+    connection, even when the same object has several (e.g. a column with
+    walls on multiple sides gets one callout per wall, not a single
+    combined one). Must be called inside an open transaction. Returns
     (view, error_message) - view is None and error_message is set when
     the callout couldn't be created (e.g. no Floor Plan view exists yet
     for that level). The caller applies a view template, if any (see
     choose_view_template)."""
-    level = _nearest_level(contacts[0].origin.Z)
+    element_b = contact.element
+    level = _nearest_level(contact.origin.Z)
     if level is None:
         return None, "no Level found in the project"
 
@@ -893,32 +879,15 @@ def create_plan_callout(element_a, contacts):
     if callout_type is None:
         return None, "the level's Floor Plan view has no view type"
 
-    bbox_a = get_bounding_box(element_a)
-    min_x, min_y = bbox_a.Min.X, bbox_a.Min.Y
-    max_x, max_y = bbox_a.Max.X, bbox_a.Max.Y
-    for contact in contacts:
-        partner_bbox = get_bounding_box(contact.element)
-        if partner_bbox is None:
-            continue
-        min_x = min(min_x, partner_bbox.Min.X)
-        min_y = min(min_y, partner_bbox.Min.Y)
-        max_x = max(max_x, partner_bbox.Max.X)
-        max_y = max(max_y, partner_bbox.Max.Y)
-
-    margin = mm(300.0)
-    point1 = DB.XYZ(min_x - margin, min_y - margin, 0)
-    point2 = DB.XYZ(max_x + margin, max_y + margin, 0)
+    half_width = mm(SECTION_WIDTH_MM) / 2.0
+    origin = contact.origin
+    point1 = DB.XYZ(origin.X - half_width, origin.Y - half_width, 0)
+    point2 = DB.XYZ(origin.X + half_width, origin.Y + half_width, 0)
 
     callout_view = DB.ViewSection.CreateCallout(
         doc, owner_view.Id, callout_type.Id, point1, point2
     )
-    if len(contacts) == 1:
-        name = unique_section_name(type_name(element_a), type_name(contacts[0].element))
-    else:
-        name = unique_section_name(
-            type_name(element_a),
-            "Plan Connections ({})".format(len(contacts))
-        )
+    name = unique_section_name(type_name(element_a), type_name(element_b))
     set_name(callout_view, name)
     return callout_view, None
 
@@ -1090,23 +1059,22 @@ def main():
                 )
             )
 
-        for element_a, contacts in group_plan_jobs_by_seed(plan_jobs):
-            callout_view, error = create_plan_callout(element_a, contacts)
+        for element_a, contact in plan_jobs:
+            callout_view, error = create_plan_callout(element_a, contact)
             if callout_view is None:
                 plan_failures.append(
-                    "{} (×{} connection(s)): {}".format(
-                        element_label(element_a), len(contacts), error
+                    "{} ↔ {}: {}".format(
+                        element_label(element_a), element_label(contact.element), error
                     )
                 )
                 continue
             if plan_template is not None:
                 callout_view.ViewTemplateId = plan_template.Id
-            tag_connections(callout_view, [(element_a, c.element) for c in contacts])
+            tag_connections(callout_view, [(element_a, contact.element)])
             created_views.append(callout_view)
             output.print_md(
-                "Created **{}** (plan callout, {} connection(s)) with {}".format(
-                    get_name(callout_view), len(contacts),
-                    ", ".join(element_label(c.element) for c in contacts)
+                "Created **{}** (plan callout) — {} contact with {}".format(
+                    get_name(callout_view), contact.kind, element_label(contact.element)
                 )
             )
 
