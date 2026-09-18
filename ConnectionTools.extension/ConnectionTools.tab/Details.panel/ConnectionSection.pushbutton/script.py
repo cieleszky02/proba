@@ -486,8 +486,11 @@ def choose_section_type():
     use (e.g. Section / Section Detail / Section Detail Number / Detail),
     unless VIEW_FAMILY_TYPE_NAME pins one, or only one type exists.
 
-    Both families are created the same way (ViewSection.CreateSection);
-    Detail is just a smaller-scale, callout-style Section under the hood."""
+    ViewSection.CreateSection only accepts a Section-family type ("The
+    ViewFamilyType must be a Section ViewFamily"), so a Detail-family
+    choice is created as a Section first and then switched with
+    ChangeTypeId — see resolve_creation_type() — the same way Revit's own
+    type selector lets you reassign an existing section to a Detail type."""
     section_types = [
         t for t in DB.FilteredElementCollector(doc).OfClass(DB.ViewFamilyType)
         if t.ViewFamily in SECTION_LIKE_FAMILIES
@@ -611,14 +614,28 @@ def unique_section_name(name_a, name_b):
         counter += 1
 
 
-def create_section_view(element_a, contact, view_family_type):
+def resolve_creation_type(view_family_type):
+    """CreateSection rejects anything but a Section-family type. If the
+    user picked a Detail type, create with any Section-family type instead
+    and switch it afterwards with ChangeTypeId."""
+    if view_family_type.ViewFamily == DB.ViewFamily.Section:
+        return view_family_type
+    for t in DB.FilteredElementCollector(doc).OfClass(DB.ViewFamilyType):
+        if t.ViewFamily == DB.ViewFamily.Section:
+            return t
+    return None
+
+
+def create_section_view(element_a, contact, creation_type, final_type):
     """Create one section/detail view for a single contact. Must be called
     inside an open transaction."""
     element_b = contact.element
     section_box = build_section_box(element_a, element_b, contact)
     name = unique_section_name(type_name(element_a), type_name(element_b))
 
-    section_view = DB.ViewSection.CreateSection(doc, view_family_type.Id, section_box)
+    section_view = DB.ViewSection.CreateSection(doc, creation_type.Id, section_box)
+    if final_type.Id != creation_type.Id:
+        section_view.ChangeTypeId(final_type.Id)
     set_name(section_view, name)
     if VIEW_TEMPLATE_NAME:
         template = _find_view_template(VIEW_TEMPLATE_NAME)
@@ -646,10 +663,19 @@ def main():
     if view_family_type is None:
         return
 
+    creation_type = resolve_creation_type(view_family_type)
+    if creation_type is None:
+        forms.alert(
+            "No Section view type exists in this project to create the view "
+            "with (one is needed even to create a Detail View type).",
+            title="Connection Section"
+        )
+        return
+
     created_views = []
     with revit.Transaction("Create Connection Section(s)"):
         for contact in contacts:
-            section_view = create_section_view(element_a, contact, view_family_type)
+            section_view = create_section_view(element_a, contact, creation_type, view_family_type)
             created_views.append(section_view)
             output.print_md(
                 "Created **{}** — {} contact with {}, {:.0f} mm long".format(
