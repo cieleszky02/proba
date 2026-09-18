@@ -73,6 +73,7 @@ Status: needs verification in Revit
 ------------------------------------
 
 * [ ] Section box convention: the code assumes the section box `Transform.Origin` sits on the cut plane (local `Z = 0`), with `Min.Z` a small near-clip buffer and `Max.Z` the far clip depth. Confirm the cut goes through the joint and does not look away from it.
+* [x] `build_section_box()` grew the crop to the FULL combined bounding box of both elements with no upper bound, so a large/complex element (a multi-flight stair spanning a full floor height, a long wall) could balloon the crop far beyond the joint itself — seen as an oddly wide elevation-like section for a column-to-floor connection, and reported as a "weirdly placed" section for a stair connection. Added `SECTION_MAX_WIDTH_MM`/`SECTION_MAX_TOP_MM`/`SECTION_MAX_BOTTOM_MM`/`SECTION_MAX_DEPTH_MM` caps, clamped around the joint origin. Needs a real retest on the same stair case to confirm the crop is now reasonable and the joint is actually centred in it (the cap alone doesn't fix a wrong `joint_dir`/`origin` if the stair's many small tread/riser/stringer faces cause `_detect_face_contact` to pick an unexpected face pair — if the section still looks wrong after this, that's the next thing to check).
 * [ ] Floor next to floor (side contact): the section should be perpendicular to the shared edge.
 * [ ] Floor on wall (top/bottom contact): the section should be perpendicular to the wall's length.
 * [ ] Sloped roofs or floors (a non-horizontal contact face).

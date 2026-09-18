@@ -53,6 +53,16 @@ SECTION_WIDTH_MM = 1200.0   # minimum crop box width, centred on the joint origi
 SECTION_TOP_MM = 600.0      # crop box extends this far above the combined elements
 SECTION_BOTTOM_MM = 600.0   # ... and this far below
 
+# Upper bounds on the above: the crop normally grows to fit both elements'
+# combined bounding box, but a large/complex element (a multi-flight stair,
+# a long wall) can make that box far bigger than the joint itself needs -
+# these keep the crop a reasonable "detail" size, centred on the joint,
+# instead of blowing up to the full size of whichever element is largest.
+SECTION_MAX_WIDTH_MM = 4000.0
+SECTION_MAX_TOP_MM = 2500.0
+SECTION_MAX_BOTTOM_MM = 2500.0
+SECTION_MAX_DEPTH_MM = 4000.0
+
 VIEW_FAMILY_TYPE_NAME = None   # None = ask the user which Section type to use
 VIEW_TEMPLATE_NAME = None      # None = no template applied
 
@@ -784,9 +794,13 @@ def build_section_box(element_a, element_b, contact):
             )
 
     half_width = max(mm(SECTION_WIDTH_MM) / 2.0, (local_max.X - local_min.X) / 2.0 + mm(300.0))
-    top = local_max.Y + mm(SECTION_TOP_MM)
-    bottom = local_min.Y - mm(SECTION_BOTTOM_MM)
+    half_width = min(half_width, mm(SECTION_MAX_WIDTH_MM) / 2.0)
+
+    top = min(local_max.Y + mm(SECTION_TOP_MM), mm(SECTION_MAX_TOP_MM))
+    bottom = max(local_min.Y - mm(SECTION_BOTTOM_MM), -mm(SECTION_MAX_BOTTOM_MM))
+
     far_depth = max(mm(SECTION_DEPTH_MM), (local_max.Z - local_min.Z) / 2.0 + mm(300.0))
+    far_depth = min(far_depth, mm(SECTION_MAX_DEPTH_MM))
 
     section_box = DB.BoundingBoxXYZ()
     section_box.Transform = transform
