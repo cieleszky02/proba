@@ -571,11 +571,13 @@ def _is_vertical_category(element):
 
 
 def is_ambiguous_orientation(element_a, contact):
-    """True for a side contact between two vertical elements (a wall/column
-    corner or T-junction), where a horizontal Plan callout can show the
-    connection at least as well as a vertical Section/Detail."""
+    """True for a side or overlap contact between two vertical elements
+    (a wall/column corner or T-junction, or a column thicker than the
+    wall it meets - too fat to share a clean coplanar face, so it shows
+    up as "overlap" rather than "side"), where a horizontal Plan callout
+    can show the connection at least as well as a vertical Section/Detail."""
     return (
-        contact.kind == "side"
+        contact.kind in ("side", "overlap")
         and _is_vertical_category(element_a)
         and _is_vertical_category(contact.element)
     )
@@ -1000,7 +1002,14 @@ def main():
     section_jobs = []
     plan_jobs = []
     for element_a, contact in connections:
-        if is_ambiguous_orientation(element_a, contact):
+        ambiguous = is_ambiguous_orientation(element_a, contact)
+        output.print_md(
+            "- {} ↔ {} — {} contact{}".format(
+                element_label(element_a), element_label(contact.element), contact.kind,
+                ", asking Section vs. Plan" if ambiguous else ""
+            )
+        )
+        if ambiguous:
             kind = choose_view_kind(element_a, contact)
             if kind is None:
                 continue
