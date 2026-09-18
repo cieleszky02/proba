@@ -7,14 +7,15 @@ clicks. For each room, the script creates:
 
 1. A sheet named after the room.
 2. A floor plan or callout, cropped to the room (by rectangle or room outline).
-3. Two sections through the room centre, one along X and one along Y.
-4. A 3D view with a section box around the room.
-5. Places all four views on the sheet.
+3. A reflected ceiling plan (callout or standalone), cropped the same way.
+4. Two sections through the room centre, one along X and one along Y.
+5. A 3D view with a section box around the room.
+6. Places all five views on the sheet.
 
 All names derive from the room name. If any name or the sheet number already
 exists, a shared iteration number is appended so every view of that room
-carries the same suffix (e.g. `Kitchen 1 - Plan`, `Kitchen 1 - Section X`,
-and so on).
+carries the same suffix (e.g. `Kitchen 1 - Plan`, `Kitchen 1 - RCP`,
+`Kitchen 1 - Section X`, and so on).
 
 ## Structure
 
@@ -49,7 +50,10 @@ RoomTools.extension/
       that the X section looks north, the Y section looks west, and both
       cut through the room centre.
 * [ ] Callout creation with `ViewSection.CreateCallout` using the FloorPlan
-      type, plus the fallback to `ViewPlan.Create`.
+      and CeilingPlan types, plus the fallback to `ViewPlan.Create`.
+* [x] Plan / section X / section Y / 3D / sheet, on a basic rectangular
+      room — confirmed working in Revit.
+* [ ] RCP (new): not yet tested in Revit.
 * [ ] Room-shape crop, including the offset direction of
       `CurveLoop.CreateViaOffset`.
 * [ ] Iteration naming when running twice on the same room, and on two
@@ -96,6 +100,13 @@ RoomTools.extension/
   the room centre; `Min.Z` is negative and extends past the room's far
   side by `SECTION_DEPTH_OFFSET_MM`. This is the piece most likely to need
   correction after a real Revit test — see the status checklist above.
-* Sheet layout is a plain 2x2 grid computed from the placed title block's
-  bounding box (or a hard-coded fallback area when there is no title
-  block). It does not yet resolve overlaps — that's roadmap item 2.
+* Sheet layout is a plain grid (`grid_centers(area_min, area_max, rows,
+  cols)`) computed from the placed title block's bounding box (or a
+  hard-coded fallback area when there is no title block). The room sheet
+  uses a 2x3 grid for its 5 views (plan / RCP / 3D on top, the two
+  sections below, one cell unused). It does not yet resolve overlaps —
+  that's roadmap item 2.
+* Plan and RCP share `create_cropped_plan_view()` (callout on the level's
+  existing plan of that `ViewType`, `ViewPlan.Create` fallback) and
+  `build_crop_loop()` for the crop shape; only the `ViewFamily` /
+  `ViewType` passed in differ.

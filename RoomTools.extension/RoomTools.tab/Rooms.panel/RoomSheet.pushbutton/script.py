@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Create a sheet (plan/callout + 2 sections + 3D view) for each selected room.
+"""Create a sheet (plan/RCP callouts + 2 sections + 3D view) for each room.
 
 Select one or more rooms before clicking, or the tool will prompt you to
-pick them. For every room this creates a floor plan (or callout) cropped
+pick them. For every room this creates a floor plan and a reflected
+ceiling plan (each a callout, or a standalone view as a fallback) cropped
 to the room, an X section and a Y section through the room centre, a 3D
-view with a section box around the room, and a sheet with all four views
+view with a section box around the room, and a sheet with all five views
 placed on it. All names are derived from the room name; if a name or the
 sheet number already exists, a shared iteration number is appended to
 every view of that room.
@@ -46,6 +47,7 @@ BOX_3D_TOP_OFFSET_MM = 600.0
 BOX_3D_BOTTOM_OFFSET_MM = 300.0
 
 PLAN_VIEW_SCALE = 50
+CEILING_VIEW_SCALE = 50
 SECTION_VIEW_SCALE = 50
 
 # Substring (case-insensitive) to match a title block family name.
@@ -62,6 +64,7 @@ FALLBACK_SHEET_HEIGHT_MM = 550.0
 
 VIEW_NAME_TEMPLATE = {
     'plan': u"{room} - Plan",
+    'ceiling': u"{room} - RCP",
     'section_x': u"{room} - Section X",
     'section_y': u"{room} - Section Y",
     'view_3d': u"{room} - 3D",
@@ -178,6 +181,7 @@ def resolve_names(base_name, taken_view_names, taken_sheet_numbers):
 
         names = {
             'plan': VIEW_NAME_TEMPLATE['plan'].format(room=candidate),
+            'ceiling': VIEW_NAME_TEMPLATE['ceiling'].format(room=candidate),
             'section_x': VIEW_NAME_TEMPLATE['section_x'].format(room=candidate),
             'section_y': VIEW_NAME_TEMPLATE['section_y'].format(room=candidate),
             'view_3d': VIEW_NAME_TEMPLATE['view_3d'].format(room=candidate),
@@ -193,7 +197,7 @@ def resolve_names(base_name, taken_view_names, taken_sheet_numbers):
             names['sheet_name'] = candidate
             names['sheet_number'] = sheet_number
             taken_view_names.update(names[k] for k in
-                                     ('plan', 'section_x', 'section_y', 'view_3d'))
+                                     ('plan', 'ceiling', 'section_x', 'section_y', 'view_3d'))
             taken_sheet_numbers.add(sheet_number)
             return names
 
@@ -211,11 +215,11 @@ def find_view_family_type(document, view_family):
     return None
 
 
-def find_floor_plan_for_level(document, level_id):
+def find_plan_view_for_level(document, level_id, view_type):
     for view in DB.FilteredElementCollector(document).OfClass(DB.ViewPlan):
         if view.IsTemplate:
             continue
-        if view.ViewType != DB.ViewType.FloorPlan:
+        if view.ViewType != view_type:
             continue
         gen_level = view.GenLevel
         if gen_level is not None and gen_level.Id == level_id:
@@ -285,12 +289,21 @@ def apply_crop_shape(view, curve_loop):
 # View creation
 # ---------------------------------------------------------------------------
 
-def create_room_plan(document, plan_vft, room, room_bbox, level):
+def build_crop_loop(room, room_bbox, offset, z):
+    crop_loop = None
+    if USE_ROOM_SHAPE_CROP:
+        crop_loop = room_outline_curve_loop(room, offset)
+    if crop_loop is None:
+        crop_loop = rectangle_curve_loop(room_bbox.Min, room_bbox.Max, offset, z)
+    return crop_loop
+
+
+def create_cropped_plan_view(document, plan_vft, view_type, room_bbox, level, crop_loop):
     offset = mm(CROP_OFFSET_MM)
     z = room_bbox.Min.Z
 
     plan_view = None
-    parent_plan = find_floor_plan_for_level(document, level.Id)
+    parent_plan = find_plan_view_for_level(document, level.Id, view_type)
     if parent_plan is not None:
         p1 = DB.XYZ(room_bbox.Min.X - offset, room_bbox.Min.Y - offset, z)
         p2 = DB.XYZ(room_bbox.Max.X + offset, room_bbox.Max.Y + offset, z)
@@ -299,25 +312,38 @@ def create_room_plan(document, plan_vft, room, room_bbox, level):
                 document, plan_vft.Id, parent_plan.Id, p1, p2
             )
         except Exception:
-            logger.warning("Callout creation failed, falling back to a standalone floor plan.")
+            logger.warning("Callout creation failed, falling back to a standalone view.")
             plan_view = None
 
     if plan_view is None:
         plan_view = DB.ViewPlan.Create(document, plan_vft.Id, level.Id)
 
-    crop_loop = None
-    if USE_ROOM_SHAPE_CROP:
-        crop_loop = room_outline_curve_loop(room, offset)
-    if crop_loop is None:
-        crop_loop = rectangle_curve_loop(room_bbox.Min, room_bbox.Max, offset, z)
     apply_crop_shape(plan_view, crop_loop)
+    return plan_view
 
+
+def create_room_plan(document, plan_vft, room, room_bbox, level):
+    crop_loop = build_crop_loop(room, room_bbox, mm(CROP_OFFSET_MM), room_bbox.Min.Z)
+    plan_view = create_cropped_plan_view(
+        document, plan_vft, DB.ViewType.FloorPlan, room_bbox, level, crop_loop
+    )
     try:
         plan_view.Scale = PLAN_VIEW_SCALE
     except Exception:
         pass
-
     return plan_view
+
+
+def create_room_ceiling_plan(document, ceiling_vft, room, room_bbox, level):
+    crop_loop = build_crop_loop(room, room_bbox, mm(CROP_OFFSET_MM), room_bbox.Min.Z)
+    ceiling_view = create_cropped_plan_view(
+        document, ceiling_vft, DB.ViewType.CeilingPlan, room_bbox, level, crop_loop
+    )
+    try:
+        ceiling_view.Scale = CEILING_VIEW_SCALE
+    except Exception:
+        pass
+    return ceiling_view
 
 
 def create_room_section(document, section_vft, room_bbox, center, axis):
@@ -440,22 +466,24 @@ def get_sheet_content_area(document, sheet):
     )
 
 
-def grid_centers(area_min, area_max):
+def grid_centers(area_min, area_max, rows, cols):
+    """Row-major centers (top row first) of a rows x cols grid over the area."""
     width = area_max.X - area_min.X
     height = area_max.Y - area_min.Y
-    cols = (area_min.X + width * 0.25, area_min.X + width * 0.75)
-    rows = (area_min.Y + height * 0.25, area_min.Y + height * 0.75)
-    return [
-        DB.XYZ(cols[0], rows[1], 0),   # top-left
-        DB.XYZ(cols[1], rows[1], 0),   # top-right
-        DB.XYZ(cols[0], rows[0], 0),   # bottom-left
-        DB.XYZ(cols[1], rows[0], 0),   # bottom-right
-    ]
+    col_w = width / cols
+    row_h = height / rows
+    centers = []
+    for r in range(rows):
+        row_y = area_max.Y - row_h * (r + 0.5)
+        for c in range(cols):
+            col_x = area_min.X + col_w * (c + 0.5)
+            centers.append(DB.XYZ(col_x, row_y, 0))
+    return centers
 
 
-def place_views_on_sheet(document, sheet, views_in_order):
+def place_views_on_sheet(document, sheet, views_in_order, rows, cols):
     area_min, area_max = get_sheet_content_area(document, sheet)
-    centers = grid_centers(area_min, area_max)
+    centers = grid_centers(area_min, area_max, rows, cols)
     for view, point in zip(views_in_order, centers):
         if DB.Viewport.CanAddViewToSheet(document, sheet.Id, view.Id):
             DB.Viewport.Create(document, sheet.Id, view.Id, point)
@@ -489,6 +517,9 @@ def create_room_sheet(document, room, vfts, taken_view_names, taken_sheet_number
     plan_view = create_room_plan(document, vfts['plan'], room, room_bbox, level)
     plan_view.Name = names['plan']
 
+    ceiling_view = create_room_ceiling_plan(document, vfts['ceiling'], room, room_bbox, level)
+    ceiling_view.Name = names['ceiling']
+
     section_x = create_room_section(document, vfts['section'], room_bbox, center, 'x')
     section_x.Name = names['section_x']
 
@@ -503,7 +534,9 @@ def create_room_sheet(document, room, vfts, taken_view_names, taken_sheet_number
     sheet.Name = names['sheet_name']
     sheet.SheetNumber = names['sheet_number']
 
-    place_views_on_sheet(document, sheet, [plan_view, view_3d, section_x, section_y])
+    # 2 rows x 3 cols: plan / ceiling / 3D on top, the two sections below.
+    views_in_order = [plan_view, ceiling_view, view_3d, section_x, section_y]
+    place_views_on_sheet(document, sheet, views_in_order, rows=2, cols=3)
 
     return sheet
 
@@ -520,6 +553,7 @@ def main():
 
     vfts = {
         'plan': find_view_family_type(doc, DB.ViewFamily.FloorPlan),
+        'ceiling': find_view_family_type(doc, DB.ViewFamily.CeilingPlan),
         'section': find_view_family_type(doc, DB.ViewFamily.Section),
         'view_3d': find_view_family_type(doc, DB.ViewFamily.ThreeDimensional),
     }
