@@ -721,8 +721,16 @@ def create_section_view(element_a, contact, creation_type, final_type):
 # --------------------------------------------------------------------- ---
 
 def main():
+    output.show()
+    output.print_md(
+        "**Select the FIRST component** — floor, wall, roof, ceiling, "
+        "beam, column or foundation — in the model. "
+        "(The same prompt also shows in Revit's status bar / next to the cursor.)"
+    )
+
     element_a = pick_first_element()
     if element_a is None:
+        output.print_md("Cancelled — no first component was selected.")
         return
     output.print_md("**First component:** {}".format(element_label(element_a)))
 
