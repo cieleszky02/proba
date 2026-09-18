@@ -256,6 +256,31 @@ def loop_is_counterclockwise(curve_loop):
     return area > 0
 
 
+def tessellate_curves_to_points(curves):
+    """Flatten a closed chain of curves (lines, arcs, ...) into a single
+    polyline point list, since crop shapes must be straight lines only."""
+    points = []
+    for curve in curves:
+        pts = list(curve.Tessellate())
+        if points and points[-1].IsAlmostEqualTo(pts[0]):
+            pts = pts[1:]
+        points.extend(pts)
+    if len(points) > 1 and not points[-1].IsAlmostEqualTo(points[0]):
+        points.append(points[0])
+    return points
+
+
+def curve_loop_from_points(points):
+    loop = DB.CurveLoop()
+    for i in range(len(points) - 1):
+        p1 = points[i]
+        p2 = points[i + 1]
+        if p1.DistanceTo(p2) < 0.0005:  # drop near-zero-length segments
+            continue
+        loop.Append(DB.Line.CreateBound(p1, p2))
+    return loop
+
+
 def room_outline_curve_loop(room, offset):
     options = DB.SpatialElementBoundaryOptions()
     loops = room.GetBoundarySegments(options)
@@ -263,9 +288,13 @@ def room_outline_curve_loop(room, offset):
         return None
 
     outer = loops[0]
-    curve_loop = DB.CurveLoop()
-    for segment in outer:
-        curve_loop.Append(segment.GetCurve())
+    # Crop shapes only accept straight lines (SetCropShape rejects arcs),
+    # so curved boundaries -- round rooms, bullnose walls -- are tessellated
+    # into a polygon approximation before anything else touches them.
+    points = tessellate_curves_to_points([segment.GetCurve() for segment in outer])
+    curve_loop = curve_loop_from_points(points)
+    if curve_loop.NumberOfCurves() < 3:
+        return None
 
     # CreateViaOffset's sign is relative to the loop's winding direction,
     # which Revit does not guarantee here, so we measure it instead of

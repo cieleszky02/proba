@@ -56,6 +56,13 @@ RoomTools.extension/
 * [ ] RCP (new): not yet tested in Revit.
 * [ ] Room-shape crop, including the offset direction of
       `CurveLoop.CreateViaOffset`.
+* [x] Curved room boundaries (round/bullnose rooms). Fixed: a round room's
+      boundary has Arc segments, but `CropRegionShapeManager.SetCropShape`
+      only accepts straight lines ("Boundary ... should represent one
+      closed curve loop ... consisting of non-zero length straight
+      lines"). `room_outline_curve_loop` now tessellates every boundary
+      curve into a polyline before offsetting/cropping. Needs a retest on
+      the round room that originally hit this.
 * [ ] Iteration naming when running twice on the same room, and on two
       rooms with the same name.
 * [ ] Layout on the sheet, with and without a title block.
@@ -95,6 +102,15 @@ RoomTools.extension/
   boundary loop's winding is computed with a shoelace sum instead of
   assumed, and the offset sign is flipped so it always grows the loop
   outward, regardless of which way Revit happens to wind the boundary.
+* `CropRegionShapeManager.SetCropShape` rejects any curve that isn't a
+  straight `Line` (confirmed by a real Revit error on a round room:
+  "Boundary ... should represent one closed curve loop ... consisting of
+  non-zero length straight lines"). `room_outline_curve_loop` therefore
+  calls `Curve.Tessellate()` on every boundary segment (line or arc) and
+  rebuilds the loop from the resulting points before offsetting, so a
+  curved room gets a polygon-approximated crop instead of failing.
+  `Line.Tessellate()` just returns its own two endpoints, so this is a
+  no-op for rectangular rooms.
 * Section box construction places `Transform.Origin` at the room's 3D
   bbox centre and sets local `Max.Z = 0`, so the cut plane sits exactly at
   the room centre; `Min.Z` is negative and extends past the room's far
