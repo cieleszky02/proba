@@ -32,11 +32,12 @@ uidoc = revit.uidoc
 
 # Plan / callout crop, offset beyond the room boundary.
 CROP_OFFSET_MM = 300.0
-USE_ROOM_SHAPE_CROP = True     # True: crop to room outline. False: rectangle.
+USE_ROOM_SHAPE_CROP = False    # True: crop to room outline. False: rectangle.
 CROP_BOX_VISIBLE = False
 
 # Section extents, offset beyond the room in each direction.
 SECTION_SIDE_OFFSET_MM = 300.0     # left / right, beyond the room width
+SECTION_NEAR_OFFSET_MM = 150.0     # small buffer on the cut side (see note below)
 SECTION_DEPTH_OFFSET_MM = 300.0    # far clip, beyond the room depth
 SECTION_TOP_OFFSET_MM = 600.0      # above the room's top
 SECTION_BOTTOM_OFFSET_MM = 300.0   # below the room's base
@@ -398,24 +399,29 @@ def create_room_section(document, section_vft, room_bbox, center, axis):
     transform.BasisZ = basis_z
 
     side_offset = mm(SECTION_SIDE_OFFSET_MM)
+    near_offset = mm(SECTION_NEAR_OFFSET_MM)
     depth_offset = mm(SECTION_DEPTH_OFFSET_MM)
     bottom_offset = mm(SECTION_BOTTOM_OFFSET_MM)
     top_offset = mm(SECTION_TOP_OFFSET_MM)
 
     section_box = DB.BoundingBoxXYZ()
     section_box.Transform = transform
-    # Max.Z = 0 puts the cut plane exactly at the room centre (the
-    # transform's origin); Min.Z is the far clip, beyond the room's far
-    # side. See CLAUDE.md status checklist: verify against a real section.
+    # Confirmed against a real Revit section: the cut line Revit draws in
+    # the parent plan sits at local Min.Z, not Max.Z as the usual "near
+    # clip" assumption would suggest. So Min.Z is pinned to (nearly) the
+    # transform's origin -- the room centre -- and Max.Z is the far side,
+    # beyond the room's far edge in the view direction. Min.Z is offset by
+    # a small SECTION_NEAR_OFFSET_MM rather than exactly 0 to avoid a
+    # degenerate zero-thickness bound.
     section_box.Min = DB.XYZ(
         -(half_width + side_offset),
         room_bbox.Min.Z - center.Z - bottom_offset,
-        -(half_depth + depth_offset),
+        -near_offset,
     )
     section_box.Max = DB.XYZ(
         half_width + side_offset,
         room_bbox.Max.Z - center.Z + top_offset,
-        0.0,
+        half_depth + depth_offset,
     )
 
     section_view = DB.ViewSection.CreateSection(document, section_vft.Id, section_box)

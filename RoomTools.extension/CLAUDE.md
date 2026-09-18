@@ -45,24 +45,48 @@ RoomTools.extension/
 
 ## Status: needs verification in Revit
 
-* [ ] Section box orientation. The code assumes `Max.Z` is the cut plane and
-      `Min.Z` is the far clip, with the view looking along `-BasisZ`. Check
-      that the X section looks north, the Y section looks west, and both
-      cut through the room centre.
+* [~] Section box position. FIXED (needs retest): a real Revit test on a
+      round room showed both section cut lines drawn tangent to the room's
+      edge, offset from centre by ~the room's own radius, instead of
+      through the centroid. The offset's exact magnitude matched
+      `Min.Z`'s value, not `Max.Z` (which was set to `0.0`, expecting
+      *that* to be the on-centre bound) — so empirically Revit anchors the
+      drawn cut line to local `Min.Z`, the opposite of the usual "near
+      clip" assumption. Fixed by pinning `Min.Z` to (almost) the
+      transform's origin instead of `Max.Z`; see the implementation notes
+      below. NOT yet re-verified, and specifically: confirm (a) the cut
+      line now passes through the centroid, and (b) the section's actual
+      content still shows the intended side of the room (X looking north,
+      Y looking west) — swapping which bound sits at the origin only
+      changes *where the line is drawn*; it does not touch `BasisZ`, so
+      the view-direction reasoning is unchanged, but this combination
+      (`Min.Z` at origin + unchanged `BasisZ`) has not itself been tested.
+      If the section content turns out to show the wrong side of the room
+      (south instead of north, or east instead of west), negate `basis_z`
+      for that axis in `create_room_section`.
 * [ ] Callout creation with `ViewSection.CreateCallout` using the FloorPlan
       and CeilingPlan types, plus the fallback to `ViewPlan.Create`.
-* [x] Plan / section X / section Y / 3D / sheet, on a basic rectangular
-      room — confirmed working in Revit.
-* [ ] RCP (new): not yet tested in Revit.
-* [ ] Room-shape crop, including the offset direction of
-      `CurveLoop.CreateViaOffset`.
-* [x] Curved room boundaries (round/bullnose rooms). Fixed: a round room's
-      boundary has Arc segments, but `CropRegionShapeManager.SetCropShape`
-      only accepts straight lines ("Boundary ... should represent one
-      closed curve loop ... consisting of non-zero length straight
-      lines"). `room_outline_curve_loop` now tessellates every boundary
-      curve into a polyline before offsetting/cropping. Needs a retest on
-      the round room that originally hit this.
+* [x] Plan / RCP / 3D / sheet, on a basic rectangular room — confirmed
+      working in Revit. (Sections were also "working" in this test in the
+      sense of not erroring, but the off-centre bug above almost
+      certainly affected them too; it just wasn't noticed until the round
+      room made it visually obvious.)
+* [ ] RCP: confirmed callout-vs-crop-shape mechanics work on a round room;
+      not yet tested on a room with no existing ceiling plan for its level
+      (the `ViewPlan.Create` fallback path).
+* [x] Room-shape crop, including the offset direction of
+      `CurveLoop.CreateViaOffset`. Tessellation for curved boundaries
+      (below) is confirmed working. `USE_ROOM_SHAPE_CROP` now defaults to
+      `False` (always a rectangle) per explicit request — the room-outline
+      crop is still implemented and available by flipping that flag back.
+* [x] Curved room boundaries (round/bullnose rooms). Fixed and confirmed:
+      a round room's boundary has Arc segments, but
+      `CropRegionShapeManager.SetCropShape` only accepts straight lines
+      ("Boundary ... should represent one closed curve loop ...
+      consisting of non-zero length straight lines").
+      `room_outline_curve_loop` tessellates every boundary curve into a
+      polyline before offsetting/cropping. Only exercised via
+      `USE_ROOM_SHAPE_CROP = True`, now off by default (see above).
 * [ ] Iteration naming when running twice on the same room, and on two
       rooms with the same name.
 * [ ] Layout on the sheet, with and without a title block.
@@ -112,10 +136,17 @@ RoomTools.extension/
   `Line.Tessellate()` just returns its own two endpoints, so this is a
   no-op for rectangular rooms.
 * Section box construction places `Transform.Origin` at the room's 3D
-  bbox centre and sets local `Max.Z = 0`, so the cut plane sits exactly at
-  the room centre; `Min.Z` is negative and extends past the room's far
-  side by `SECTION_DEPTH_OFFSET_MM`. This is the piece most likely to need
-  correction after a real Revit test — see the status checklist above.
+  bbox centre. Empirically (see status checklist), Revit draws the parent
+  plan's section cut line at local `Min.Z`, not `Max.Z` — so `Min.Z` is
+  pinned to `-SECTION_NEAR_OFFSET_MM` (a small buffer, not exactly `0`, to
+  avoid a degenerate zero-thickness bound) and `Max.Z` is the positive far
+  bound, `half_depth + SECTION_DEPTH_OFFSET_MM` beyond the room's far
+  edge. `BasisX`/`BasisY`/`BasisZ` (and therefore which cardinal direction
+  each section looks) were left unchanged by this fix — only *where the
+  cut line is drawn* was addressed, not *which side of the room is
+  visible content*. Those could turn out to be inconsistent with each
+  other (see status checklist); if so, the fix is to negate `basis_z` for
+  the affected axis, not to touch Min.Z/Max.Z again.
 * Sheet layout is a plain grid (`grid_centers(area_min, area_max, rows,
   cols)`) computed from the placed title block's bounding box (or a
   hard-coded fallback area when there is no title block). The room sheet
