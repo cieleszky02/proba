@@ -118,14 +118,17 @@ def _get_connection_schema():
     return builder.Finish()
 
 
-def tag_connection(section_view, element_a, element_b):
-    """Record which two TYPES this view documents. Must be called inside
-    an open transaction."""
+def tag_connections(view, pairs):
+    """Record every (element_a, element_b) TYPE pair this view documents -
+    a combined Plan callout can cover several. Encoded as two "|"-joined,
+    index-aligned strings rather than Extensible Storage array fields, to
+    keep this to the same simple string field mechanism used everywhere
+    else. Must be called inside an open transaction."""
     schema = _get_connection_schema()
     entity = Entity(schema)
-    entity.Set[str](CONNECTION_SCHEMA_FIELD_A, _type_key(element_a))
-    entity.Set[str](CONNECTION_SCHEMA_FIELD_B, _type_key(element_b))
-    section_view.SetEntity(entity)
+    entity.Set[str](CONNECTION_SCHEMA_FIELD_A, "|".join(_type_key(a) for a, b in pairs))
+    entity.Set[str](CONNECTION_SCHEMA_FIELD_B, "|".join(_type_key(b) for a, b in pairs))
+    view.SetEntity(entity)
 
 
 def documented_pairs():
@@ -141,10 +144,13 @@ def documented_pairs():
         entity = view.GetEntity(schema)
         if not entity.IsValid():
             continue
-        id_a = entity.Get[str](CONNECTION_SCHEMA_FIELD_A)
-        id_b = entity.Get[str](CONNECTION_SCHEMA_FIELD_B)
-        if id_a and id_b:
-            pairs.add(frozenset((id_a, id_b)))
+        ids_a = entity.Get[str](CONNECTION_SCHEMA_FIELD_A)
+        ids_b = entity.Get[str](CONNECTION_SCHEMA_FIELD_B)
+        if not ids_a or not ids_b:
+            continue
+        for id_a, id_b in zip(ids_a.split("|"), ids_b.split("|")):
+            if id_a and id_b:
+                pairs.add(frozenset((id_a, id_b)))
     return pairs
 
 
@@ -850,15 +856,32 @@ def _floor_plan_for_level(level):
     return None
 
 
-def create_plan_callout(element_a, contact):
-    """Create a Plan callout, cropped around the joint, on the existing
-    Floor Plan view of the connection's level. Must be called inside an
-    open transaction. Returns (view, error_message) - view is None and
-    error_message is set when the callout couldn't be created (e.g. no
-    Floor Plan view exists yet for that level). The caller applies a view
-    template, if any (see choose_view_template)."""
-    element_b = contact.element
-    level = _nearest_level(contact.origin.Z)
+def group_plan_jobs_by_seed(plan_jobs):
+    """Combine every plan job for the same seed element (object) into one
+    group, so a column with plan connections on several sides gets a
+    single callout covering all of them instead of one each."""
+    groups = {}
+    order = []
+    for element_a, contact in plan_jobs:
+        key = str(element_a.Id)
+        if key not in groups:
+            groups[key] = (element_a, [])
+            order.append(key)
+        groups[key][1].append(contact)
+    return [groups[key] for key in order]
+
+
+def create_plan_callout(element_a, contacts):
+    """Create ONE Plan callout, on the existing Floor Plan view of the
+    connection's level, sized to cover element_a (the object) and every
+    partner element in `contacts` at once - all of that object's possible
+    horizontal/plan connections in a single view, not one callout per
+    partner. Must be called inside an open transaction. Returns
+    (view, error_message) - view is None and error_message is set when
+    the callout couldn't be created (e.g. no Floor Plan view exists yet
+    for that level). The caller applies a view template, if any (see
+    choose_view_template)."""
+    level = _nearest_level(contacts[0].origin.Z)
     if level is None:
         return None, "no Level found in the project"
 
@@ -870,17 +893,96 @@ def create_plan_callout(element_a, contact):
     if callout_type is None:
         return None, "the level's Floor Plan view has no view type"
 
-    half_width = mm(SECTION_WIDTH_MM) / 2.0
-    origin = contact.origin
-    point1 = DB.XYZ(origin.X - half_width, origin.Y - half_width, 0)
-    point2 = DB.XYZ(origin.X + half_width, origin.Y + half_width, 0)
+    bbox_a = get_bounding_box(element_a)
+    min_x, min_y = bbox_a.Min.X, bbox_a.Min.Y
+    max_x, max_y = bbox_a.Max.X, bbox_a.Max.Y
+    for contact in contacts:
+        partner_bbox = get_bounding_box(contact.element)
+        if partner_bbox is None:
+            continue
+        min_x = min(min_x, partner_bbox.Min.X)
+        min_y = min(min_y, partner_bbox.Min.Y)
+        max_x = max(max_x, partner_bbox.Max.X)
+        max_y = max(max_y, partner_bbox.Max.Y)
+
+    margin = mm(300.0)
+    point1 = DB.XYZ(min_x - margin, min_y - margin, 0)
+    point2 = DB.XYZ(max_x + margin, max_y + margin, 0)
 
     callout_view = DB.ViewSection.CreateCallout(
         doc, owner_view.Id, callout_type.Id, point1, point2
     )
-    name = unique_section_name(type_name(element_a), type_name(element_b))
+    if len(contacts) == 1:
+        name = unique_section_name(type_name(element_a), type_name(contacts[0].element))
+    else:
+        name = unique_section_name(
+            type_name(element_a),
+            "Plan Connections ({})".format(len(contacts))
+        )
     set_name(callout_view, name)
     return callout_view, None
+
+
+# ------------------------------------------------------------------ SHEET ---
+
+def _find_title_block_type():
+    types = list(
+        DB.FilteredElementCollector(doc)
+        .OfCategory(DB.BuiltInCategory.OST_TitleBlocks)
+        .WhereElementIsElementType()
+    )
+    return types[0] if types else None
+
+
+def unique_sheet_name(base):
+    existing = set(get_name(s) for s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet))
+    if base not in existing:
+        return base
+    counter = 2
+    while True:
+        candidate = "{} ({})".format(base, counter)
+        if candidate not in existing:
+            return candidate
+        counter += 1
+
+
+def unique_sheet_number(prefix="CT"):
+    existing = set(s.SheetNumber for s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet))
+    counter = 1
+    while True:
+        candidate = "{}-{}".format(prefix, counter)
+        if candidate not in existing:
+            return candidate
+        counter += 1
+
+
+SHEET_LAYOUT_COLUMNS = 4
+SHEET_LAYOUT_SPACING_MM = 500.0   # grid cell size; views vary in size, so
+                                  # large ones can still overlap - a quick
+                                  # manual nudge on the sheet may be needed
+
+
+def create_connection_sheet(sheet_title, views):
+    """Create a sheet named "<sheet_title>" (deduped like a view name) and
+    place every view in `views` on it in a simple grid. Must be called
+    inside an open transaction."""
+    title_block_type = _find_title_block_type()
+    title_block_id = title_block_type.Id if title_block_type else DB.ElementId.InvalidElementId
+
+    sheet = DB.ViewSheet.Create(doc, title_block_id)
+    set_name(sheet, unique_sheet_name(sheet_title))
+    sheet.SheetNumber = unique_sheet_number()
+
+    step = mm(SHEET_LAYOUT_SPACING_MM)
+    for i, view in enumerate(views):
+        if not DB.Viewport.CanAddViewToSheet(doc, sheet.Id, view.Id):
+            continue
+        row = i // SHEET_LAYOUT_COLUMNS
+        col = i % SHEET_LAYOUT_COLUMNS
+        point = DB.XYZ(col * step, -row * step, 0)
+        DB.Viewport.Create(doc, sheet.Id, view.Id, point)
+
+    return sheet
 
 
 # --------------------------------------------------------------------- ---
@@ -898,9 +1000,8 @@ def main():
     if not types:
         output.print_md("Cancelled — no type was selected.")
         return
-    output.print_md(
-        "**Type(s):** {}".format(", ".join(type_label(t) for t in types))
-    )
+    selected_types_label = ", ".join(type_label(t) for t in types)
+    output.print_md("**Type(s):** {}".format(selected_types_label))
 
     seed_elements = instances_of_types(bic, [t.Id for t in types])
     output.print_md("**{}** instance(s) of the selected type(s) found.".format(len(seed_elements)))
@@ -974,12 +1075,13 @@ def main():
 
     created_views = []
     plan_failures = []
+    sheet = None
     with revit.Transaction("Create Connection Views"):
         for element_a, contact in section_jobs:
             section_view = create_section_view(element_a, contact, creation_type, view_family_type)
             if section_template is not None:
                 section_view.ViewTemplateId = section_template.Id
-            tag_connection(section_view, element_a, contact.element)
+            tag_connections(section_view, [(element_a, contact.element)])
             created_views.append(section_view)
             output.print_md(
                 "Created **{}** (section) — {} contact with {}, {:.0f} mm long".format(
@@ -988,23 +1090,29 @@ def main():
                 )
             )
 
-        for element_a, contact in plan_jobs:
-            callout_view, error = create_plan_callout(element_a, contact)
+        for element_a, contacts in group_plan_jobs_by_seed(plan_jobs):
+            callout_view, error = create_plan_callout(element_a, contacts)
             if callout_view is None:
                 plan_failures.append(
-                    "{} ↔ {}: {}".format(
-                        element_label(element_a), element_label(contact.element), error
+                    "{} (×{} connection(s)): {}".format(
+                        element_label(element_a), len(contacts), error
                     )
                 )
                 continue
             if plan_template is not None:
                 callout_view.ViewTemplateId = plan_template.Id
-            tag_connection(callout_view, element_a, contact.element)
+            tag_connections(callout_view, [(element_a, c.element) for c in contacts])
             created_views.append(callout_view)
             output.print_md(
-                "Created **{}** (plan callout) — {} contact with {}".format(
-                    get_name(callout_view), contact.kind, element_label(contact.element)
+                "Created **{}** (plan callout, {} connection(s)) with {}".format(
+                    get_name(callout_view), len(contacts),
+                    ", ".join(element_label(c.element) for c in contacts)
                 )
+            )
+
+        if created_views:
+            sheet = create_connection_sheet(
+                "{} - Connections".format(selected_types_label), created_views
             )
 
     if plan_failures:
@@ -1015,7 +1123,14 @@ def main():
     if not created_views:
         return
 
-    uidoc.ActiveView = created_views[-1]
+    if sheet is not None:
+        output.print_md(
+            "Placed all views on sheet **{} - {}**.".format(sheet.SheetNumber, get_name(sheet))
+        )
+        uidoc.ActiveView = sheet
+    else:
+        uidoc.ActiveView = created_views[-1]
+
     output.print_md("Done — created **{}** connection view(s).".format(len(created_views)))
 
 
