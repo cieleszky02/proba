@@ -13,6 +13,8 @@ can be right depending on the case.
 import math
 
 from Autodesk.Revit.DB.ExtensibleStorage import AccessLevel, Entity, Schema, SchemaBuilder
+from Autodesk.Revit.Exceptions import OperationCanceledException
+from Autodesk.Revit.UI.Selection import ISelectionFilter, ObjectType
 from System import Guid
 from System.Collections.Generic import List
 
@@ -238,6 +240,85 @@ def instances_of_types(bic, type_ids):
         .WherePasses(category_filter) \
         .WhereElementIsNotElementType()
     return [e for e in collector if str(e.GetTypeId()) in id_set]
+
+
+class ElementIdSelectionFilter(ISelectionFilter):
+    """Only allow picking elements from an explicit set of ElementIds."""
+
+    def __init__(self, allowed_ids):
+        self._ids = list(allowed_ids)
+
+    def AllowElement(self, element):
+        return any(element.Id == eid for eid in self._ids)
+
+    def AllowReference(self, reference, position):
+        return True
+
+
+def _highlight(elements):
+    """Select these elements in the Revit view (Revit's default selection
+    colour is blue), so the user can see which instance(s) are involved."""
+    uidoc.Selection.SetElementIds(List[DB.ElementId]([e.Id for e in elements]))
+
+
+def _pick_instances_in_model(instances):
+    """Let the user click one or more of `instances` directly in the
+    model - highlighted blue both as candidates beforehand and as they're
+    clicked, since that's Revit's own selection behaviour."""
+    allowed_ids = [e.Id for e in instances]
+    by_id = dict((str(e.Id), e) for e in instances)
+
+    previous_selection = list(uidoc.Selection.GetElementIds())
+    _highlight(instances)
+    try:
+        refs = uidoc.Selection.PickObjects(
+            ObjectType.Element,
+            ElementIdSelectionFilter(allowed_ids),
+            "Click the instance(s) to use, then press Finish"
+        )
+    except OperationCanceledException:
+        return []
+    finally:
+        uidoc.Selection.SetElementIds(List[DB.ElementId](previous_selection))
+
+    return [by_id[str(ref.ElementId)] for ref in refs if str(ref.ElementId) in by_id]
+
+
+def _choose_instances_from_list(instances):
+    lookup = dict(("{} (id {})".format(family_type_label(e), e.Id), e) for e in instances)
+    chosen = forms.SelectFromList.show(
+        sorted(lookup.keys()),
+        title="Select instance(s)",
+        button_name="Use these instances",
+        multiselect=True
+    )
+    if not chosen:
+        return []
+    return [lookup[name] for name in chosen]
+
+
+def choose_seed_elements(all_instances):
+    """Ask which of the found instances to actually use, unless there's
+    only one to begin with."""
+    if len(all_instances) <= 1:
+        return all_instances
+
+    mode = forms.CommandSwitchWindow.show(
+        ["All instances", "Pick in model", "Choose from list"],
+        message="{} instance(s) found. Which do you want to use?".format(len(all_instances))
+    )
+    if mode is None:
+        return []
+    if mode == "All instances":
+        return all_instances
+    if mode == "Pick in model":
+        chosen = _pick_instances_in_model(all_instances)
+    else:
+        chosen = _choose_instances_from_list(all_instances)
+
+    if chosen:
+        _highlight(chosen)
+    return chosen
 
 
 # --------------------------------------------------------------- GEOMETRY ---
@@ -988,10 +1069,17 @@ def main():
     selected_types_label = ", ".join(type_label(t) for t in types)
     output.print_md("**Type(s):** {}".format(selected_types_label))
 
-    seed_elements = instances_of_types(bic, [t.Id for t in types])
-    output.print_md("**{}** instance(s) of the selected type(s) found.".format(len(seed_elements)))
-    if not seed_elements:
+    all_instances = instances_of_types(bic, [t.Id for t in types])
+    output.print_md("**{}** instance(s) of the selected type(s) found.".format(len(all_instances)))
+    if not all_instances:
         return
+
+    seed_elements = choose_seed_elements(all_instances)
+    if not seed_elements:
+        output.print_md("Cancelled — no instance was selected.")
+        return
+    if len(seed_elements) != len(all_instances):
+        output.print_md("**Using {}** of {} instance(s).".format(len(seed_elements), len(all_instances)))
 
     raw_connections = gather_unique_connections(seed_elements)
     already_documented = documented_pairs()
