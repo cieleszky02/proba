@@ -585,14 +585,38 @@ def _detect_overlap_contact(element_a, element_b):
     return Contact(element_b, "overlap", centroid, joint_dir, length)
 
 
+def _center_to_center_dir(element_a, element_b):
+    """The horizontal direction perpendicular to the line between the two
+    elements' bounding-box centres. Using this as the section's view
+    direction means the cut plane always contains that centre-to-centre
+    axis, regardless of how messy either element's actual geometry is
+    (e.g. a stair's many small tread/riser faces, which made the old
+    PCA-over-contact-points direction land at an arbitrary, non-grid-
+    aligned angle instead of something sensible)."""
+    bbox_a = get_bounding_box(element_a)
+    bbox_b = get_bounding_box(element_b)
+    center_a = bbox_a.Min.Add(bbox_a.Max).Multiply(0.5)
+    center_b = bbox_b.Min.Add(bbox_b.Max).Multiply(0.5)
+    connecting = _horizontal(center_b - center_a, DB.XYZ.BasisX)
+    perpendicular = DB.XYZ(-connecting.Y, connecting.X, 0)
+    if perpendicular.GetLength() < 1e-6:
+        return DB.XYZ.BasisX
+    return perpendicular.Normalize()
+
+
 def detect_contact(element_a, element_b):
     contact = _detect_host_contact(element_a, element_b)
-    if contact is not None:
-        return contact
-    contact = _detect_face_contact(element_a, element_b)
-    if contact is not None:
-        return contact
-    return _detect_overlap_contact(element_a, element_b)
+    if contact is None:
+        contact = _detect_face_contact(element_a, element_b)
+    if contact is None:
+        contact = _detect_overlap_contact(element_a, element_b)
+    if contact is None:
+        return None
+    # The kind/origin/length above still come from the real contact
+    # geometry; only the view direction is replaced, since that's the
+    # part sensitive to how clean the elements' faces are.
+    contact.joint_dir = _center_to_center_dir(element_a, contact.element)
+    return contact
 
 
 def find_candidates(element_a):
