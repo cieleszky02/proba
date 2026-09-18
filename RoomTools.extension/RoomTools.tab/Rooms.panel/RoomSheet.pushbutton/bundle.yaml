@@ -3,6 +3,8 @@ tooltip: >
   Select one or more rooms, then click to generate a sheet for each room:
   a cropped floor plan and reflected ceiling plan (each a callout, or a
   standalone view), two sections through the room centre (X and Y), and
-  a 3D view with a section box, all placed on the sheet. Names are
-  derived from the room name; a shared iteration number is appended to
-  all of a room's views if a name or sheet number collides.
+  a 3D view with a section box, all placed on the sheet. A dialog first
+  lets you pick a view template per view type, filtered to only the
+  templates applicable to it. Names are derived from the room name; a
+  shared iteration number is appended to all of a room's views if a name
+  or sheet number collides.

@@ -1,0 +1,46 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Apply View Templates"
+        Height="300" Width="420"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="16"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="110"/>
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+
+        <TextBlock Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2"
+                    Text="Choose a view template for each view type. Only templates applicable to that view type are listed."
+                    TextWrapping="Wrap"/>
+
+        <TextBlock Grid.Row="2" Grid.Column="0" Text="Floor Plan:" VerticalAlignment="Center" Margin="0,6"/>
+        <ComboBox Grid.Row="2" Grid.Column="1" Name="plan_combo" Margin="0,6"/>
+
+        <TextBlock Grid.Row="3" Grid.Column="0" Text="Ceiling Plan:" VerticalAlignment="Center" Margin="0,6"/>
+        <ComboBox Grid.Row="3" Grid.Column="1" Name="ceiling_combo" Margin="0,6"/>
+
+        <TextBlock Grid.Row="4" Grid.Column="0" Text="Section:" VerticalAlignment="Center" Margin="0,6"/>
+        <ComboBox Grid.Row="4" Grid.Column="1" Name="section_combo" Margin="0,6"/>
+
+        <TextBlock Grid.Row="5" Grid.Column="0" Text="3D View:" VerticalAlignment="Center" Margin="0,6"/>
+        <ComboBox Grid.Row="5" Grid.Column="1" Name="view3d_combo" Margin="0,6"/>
+
+        <StackPanel Grid.Row="7" Grid.Column="0" Grid.ColumnSpan="2"
+                    Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Name="ok_button" Content="OK" Width="84" Height="26" Margin="0,0,8,0" Click="ok_click"/>
+            <Button Name="cancel_button" Content="Cancel" Width="84" Height="26" Click="cancel_click"/>
+        </StackPanel>
+    </Grid>
+</Window>

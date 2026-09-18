@@ -15,7 +15,7 @@ Runtime: pyRevit / IronPython 2.7. No f-strings, no type hints.
 
 import traceback
 
-from pyrevit import revit, DB, script
+from pyrevit import revit, DB, script, forms
 from Autodesk.Revit.DB.Architecture import Room
 from Autodesk.Revit.UI.Selection import ISelectionFilter, ObjectType
 
@@ -74,6 +74,8 @@ VIEW_NAME_TEMPLATE = {
 ILLEGAL_NAME_CHARS = [
     '\\', ':', '{', '}', '[', ']', '|', ';', '<', '>', '?', '`', '~',
 ]
+
+NONE_TEMPLATE_LABEL = u"<None>"
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +150,97 @@ def get_selected_rooms():
             picked.append(el)
             seen_ids.add(el.Id)
     return picked
+
+
+# ---------------------------------------------------------------------------
+# View template picker
+# ---------------------------------------------------------------------------
+
+def collect_templates_by_view_type(document):
+    by_type = {}
+    for view in DB.FilteredElementCollector(document).OfClass(DB.View):
+        if not view.IsTemplate:
+            continue
+        by_type.setdefault(view.ViewType, []).append(view)
+    return by_type
+
+
+def template_options_for(by_type, view_type):
+    """(name, ElementId) pairs for templates whose ViewType matches --
+    the same rule Revit's own "Apply Template" pickers use, so a Floor
+    Plan view only ever offers Floor Plan templates, and so on."""
+    templates = by_type.get(view_type, [])
+    options = [(t.Name, t.Id) for t in templates]
+    options.sort(key=lambda pair: pair[0].lower())
+    return options
+
+
+class ViewTemplatePickerWindow(forms.WPFWindow):
+    def __init__(self, xaml_file, template_options):
+        forms.WPFWindow.__init__(self, xaml_file)
+        self.template_options = template_options
+        self.result = None
+        self._populate(self.plan_combo, template_options['plan'])
+        self._populate(self.ceiling_combo, template_options['ceiling'])
+        self._populate(self.section_combo, template_options['section'])
+        self._populate(self.view3d_combo, template_options['view_3d'])
+
+    def _populate(self, combo, options):
+        combo.ItemsSource = [NONE_TEMPLATE_LABEL] + [name for name, _id in options]
+        combo.SelectedIndex = 0
+
+    def _selected_id(self, combo, key):
+        selected_name = combo.SelectedItem
+        if not selected_name or selected_name == NONE_TEMPLATE_LABEL:
+            return None
+        for name, template_id in self.template_options[key]:
+            if name == selected_name:
+                return template_id
+        return None
+
+    def ok_click(self, sender, args):
+        self.result = {
+            'plan': self._selected_id(self.plan_combo, 'plan'),
+            'ceiling': self._selected_id(self.ceiling_combo, 'ceiling'),
+            'section': self._selected_id(self.section_combo, 'section'),
+            'view_3d': self._selected_id(self.view3d_combo, 'view_3d'),
+        }
+        self.Close()
+
+    def cancel_click(self, sender, args):
+        self.result = None
+        self.Close()
+
+
+def choose_view_templates(document):
+    """One dialog with a dropdown per view type (Plan, Ceiling Plan,
+    Section -- shared by both X and Y, 3D). Returns a dict of
+    'plan'/'ceiling'/'section'/'view_3d' -> ElementId or None. Returns {}
+    without showing anything if the model has no view templates at all;
+    returns None if the user cancelled."""
+    by_type = collect_templates_by_view_type(document)
+    template_options = {
+        'plan': template_options_for(by_type, DB.ViewType.FloorPlan),
+        'ceiling': template_options_for(by_type, DB.ViewType.CeilingPlan),
+        'section': template_options_for(by_type, DB.ViewType.Section),
+        'view_3d': template_options_for(by_type, DB.ViewType.ThreeD),
+    }
+    if not any(template_options.values()):
+        return {}
+
+    xaml_file = script.get_bundle_file('ViewTemplatePicker.xaml')
+    window = ViewTemplatePickerWindow(xaml_file, template_options)
+    window.ShowDialog()
+    return window.result
+
+
+def apply_view_template(view, template_id):
+    if template_id is None:
+        return
+    try:
+        view.ViewTemplateId = template_id
+    except Exception:
+        logger.warning("Could not apply view template to '{}'.".format(view.Name))
 
 
 # ---------------------------------------------------------------------------
@@ -531,7 +624,7 @@ def place_views_on_sheet(document, sheet, views_in_order, rows, cols):
 # Per-room orchestration
 # ---------------------------------------------------------------------------
 
-def create_room_sheet(document, room, vfts, taken_view_names, taken_sheet_numbers):
+def create_room_sheet(document, room, vfts, taken_view_names, taken_sheet_numbers, template_ids):
     room_bbox = room.get_BoundingBox(None)
     if room_bbox is None or room.Area <= 0:
         raise Exception("Room has no valid geometry (unplaced or unbounded).")
@@ -551,18 +644,23 @@ def create_room_sheet(document, room, vfts, taken_view_names, taken_sheet_number
 
     plan_view = create_room_plan(document, vfts['plan'], room, room_bbox, level)
     plan_view.Name = names['plan']
+    apply_view_template(plan_view, template_ids.get('plan'))
 
     ceiling_view = create_room_ceiling_plan(document, vfts['ceiling'], room, room_bbox, level)
     ceiling_view.Name = names['ceiling']
+    apply_view_template(ceiling_view, template_ids.get('ceiling'))
 
     section_x = create_room_section(document, vfts['section'], room_bbox, center, 'x')
     section_x.Name = names['section_x']
+    apply_view_template(section_x, template_ids.get('section'))
 
     section_y = create_room_section(document, vfts['section'], room_bbox, center, 'y')
     section_y.Name = names['section_y']
+    apply_view_template(section_y, template_ids.get('section'))
 
     view_3d = create_room_3d_view(document, vfts['view_3d'], room_bbox)
     view_3d.Name = names['view_3d']
+    apply_view_template(view_3d, template_ids.get('view_3d'))
 
     titleblock_type_id = find_titleblock_type_id(document)
     sheet = DB.ViewSheet.Create(document, titleblock_type_id)
@@ -599,6 +697,11 @@ def main():
         )
         return
 
+    template_ids = choose_view_templates(doc)
+    if template_ids is None:
+        output.print_md("**Cancelled.** No sheets created.")
+        return
+
     taken_view_names = collect_existing_view_names(doc)
     taken_sheet_numbers = collect_existing_sheet_numbers(doc)
 
@@ -611,7 +714,9 @@ def main():
         for room in rooms:
             room_label = get_room_name(room)
             try:
-                sheet = create_room_sheet(doc, room, vfts, taken_view_names, taken_sheet_numbers)
+                sheet = create_room_sheet(
+                    doc, room, vfts, taken_view_names, taken_sheet_numbers, template_ids
+                )
                 created_sheets.append(sheet)
                 output.print_md("Created sheet **{}** ({}) for room **{}**.".format(
                     sheet.Name, sheet.SheetNumber, room_label))

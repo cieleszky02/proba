@@ -11,6 +11,11 @@ clicks. For each room, the script creates:
 4. Two sections through the room centre, one along X and one along Y.
 5. A 3D view with a section box around the room.
 6. Places all five views on the sheet.
+7. Before any of this, one dialog with a dropdown per view type (Floor
+   Plan, Ceiling Plan, Section, 3D) to optionally apply a view template.
+   Each dropdown only lists templates whose own `ViewType` matches, and
+   the chosen template (if any) is applied to every room's views of that
+   type. Cancelling the dialog aborts the whole run.
 
 All names derive from the room name. If any name or the sheet number already
 exists, a shared iteration number is appended so every view of that room
@@ -23,9 +28,10 @@ carries the same suffix (e.g. `Kitchen 1 - Plan`, `Kitchen 1 - RCP`,
 RoomTools.extension/
   CLAUDE.md
   RoomTools.tab/Rooms.panel/RoomSheet.pushbutton/
-    script.py      <- all logic, CONFIG block at the top
-    bundle.yaml    <- button title/tooltip
-    icon.png       <- (add a 32x32 / 96x96 png)
+    script.py                <- all logic, CONFIG block at the top
+    bundle.yaml               <- button title/tooltip
+    icon.png                  <- (add a 32x32 / 96x96 png)
+    ViewTemplatePicker.xaml   <- the pre-run "apply view templates" dialog
 ```
 
 ## Hard constraints
@@ -77,6 +83,12 @@ RoomTools.extension/
       rooms with the same name.
 * [ ] Layout on the sheet, with and without a title block.
 * [ ] Rooms on levels with base offset or upper limit set.
+* [ ] View template picker dialog (new): not yet tested in Revit. Check
+      that (a) the dialog shows up after room selection, before anything
+      is created, (b) each dropdown only lists templates of the matching
+      `ViewType` (a project with only Floor Plan templates should leave
+      Ceiling Plan/Section/3D as `<None>`-only), (c) the chosen templates
+      actually land on the created views, and (d) Cancel creates nothing.
 
 ## Roadmap / ideas
 
@@ -86,11 +98,15 @@ RoomTools.extension/
 2. Smarter viewport packing: read `Viewport.GetBoxOutline()` after
    placement and rearrange or rescale so views never overlap. Auto-pick a
    scale that fits.
-3. Apply view templates per view type (config names), and hide the section
-   box and crop region in the 3D view.
+3. ~~Apply view templates per view type~~ -- done via the pre-run dialog
+   (`choose_view_templates` / `ViewTemplatePicker.xaml`). Still open: hide
+   the section box and crop region in the 3D view (a template can already
+   do this if it controls those visibility settings, but there's no
+   built-in fallback if the user picks `<None>` for 3D).
 4. Options dialog (`pyrevit.forms`) for offset, scales, title block, and
-   plan vs callout. Persist the choices with `script.get_config()` and
-   Shift+Click to open settings.
+   plan vs callout, along the same lines as the view template picker.
+   Persist the choices (view templates included) with `script.get_config()`
+   and Shift+Click to open settings, instead of asking every run.
 5. Tag the room in the plan and add dimensions or room tags in the
    sections.
 6. Refactor into a `lib/` module so other buttons can reuse naming and
@@ -143,3 +159,20 @@ RoomTools.extension/
   existing plan of that `ViewType`, `ViewPlan.Create` fallback) and
   `build_crop_loop()` for the crop shape; only the `ViewFamily` /
   `ViewType` passed in differ.
+* `choose_view_templates()` runs once, before the transaction (dialogs and
+  transactions don't mix well, and there's no reason to ask once per
+  room). It filters candidate templates by exact `View.ViewType` match
+  against the view being created (`FloorPlan`/`CeilingPlan`/`Section`/
+  `ThreeD`) rather than the more general `View.IsValidViewTemplate()`,
+  since that instance method needs an already-created view to call it on
+  and we want the dialog to run before anything is created. Section X and
+  Section Y share one dropdown/key (`'section'`) since both are
+  `ViewType.Section`. Returns `{}` (skip the dialog silently) if the
+  project has zero templates across all four types, or `None` if the user
+  hits Cancel — `main()` distinguishes those and aborts the whole run only
+  on the latter. `ViewTemplatePickerWindow` is a `pyrevit.forms.WPFWindow`
+  loading `ViewTemplatePicker.xaml`; its `Name="..."` elements (not
+  `x:Name`) become plain attributes on `self` (`self.plan_combo`, etc.) via
+  IronPython's `wpf.LoadComponent`, and the XAML's `Click="ok_click"` /
+  `Click="cancel_click"` bind directly to the matching methods on this
+  class.
