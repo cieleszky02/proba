@@ -60,6 +60,20 @@ def to_mm(value):
     return DB.UnitUtils.ConvertFromInternalUnits(value, DB.UnitTypeId.Millimeters)
 
 
+def get_name(element):
+    """Element.Name, read through the base class's property descriptor.
+
+    Several Element subclasses (View, ViewFamilyType, ...) hide the Name
+    property, which makes IronPython's normal `element.Name` dynamic lookup
+    raise `System.MissingMemberException: Name`. Going through the base
+    class's descriptor sidesteps that."""
+    return DB.Element.Name.GetValue(element)
+
+
+def set_name(element, name):
+    DB.Element.Name.SetValue(element, name)
+
+
 # ------------------------------------------------------------- SELECTION ---
 
 class CategorySelectionFilter(ISelectionFilter):
@@ -380,8 +394,8 @@ def type_name(element):
     type_id = element.GetTypeId()
     if type_id != DB.ElementId.InvalidElementId:
         element_type = doc.GetElement(type_id)
-        if element_type is not None and element_type.Name:
-            return element_type.Name
+        if element_type is not None and get_name(element_type):
+            return get_name(element_type)
     return element_label(element)
 
 
@@ -471,13 +485,13 @@ def choose_section_type():
 
     if VIEW_FAMILY_TYPE_NAME:
         for view_type in section_types:
-            if view_type.Name == VIEW_FAMILY_TYPE_NAME:
+            if get_name(view_type) == VIEW_FAMILY_TYPE_NAME:
                 return view_type
 
     if len(section_types) == 1:
         return section_types[0]
 
-    lookup = dict((view_type.Name, view_type) for view_type in section_types)
+    lookup = dict((get_name(view_type), view_type) for view_type in section_types)
     chosen = forms.SelectFromList.show(
         sorted(lookup.keys()),
         title="Select the section view type",
@@ -490,7 +504,7 @@ def choose_section_type():
 
 def _find_view_template(name):
     for view in DB.FilteredElementCollector(doc).OfClass(DB.View):
-        if view.IsTemplate and view.Name == name:
+        if view.IsTemplate and get_name(view) == name:
             return view
     return None
 
@@ -568,7 +582,7 @@ def build_section_box(element_a, element_b, contact):
 def unique_section_name(name_a, name_b):
     base = "{} {} / {}".format(NAME_PREFIX, name_a, name_b)
     existing = set(
-        v.Name for v in DB.FilteredElementCollector(doc).OfClass(DB.ViewSection)
+        get_name(v) for v in DB.FilteredElementCollector(doc).OfClass(DB.ViewSection)
     )
     if base not in existing:
         return base
@@ -591,7 +605,7 @@ def create_connection_section(element_a, element_b, contact):
 
     with revit.Transaction("Create Connection Section"):
         section_view = DB.ViewSection.CreateSection(doc, view_family_type.Id, section_box)
-        section_view.Name = name
+        set_name(section_view, name)
         if VIEW_TEMPLATE_NAME:
             template = _find_view_template(VIEW_TEMPLATE_NAME)
             if template is not None:
@@ -627,7 +641,7 @@ def main():
         return
 
     uidoc.ActiveView = section_view
-    output.print_md("Created section **{}**.".format(section_view.Name))
+    output.print_md("Created section **{}**.".format(get_name(section_view)))
 
 
 main()
