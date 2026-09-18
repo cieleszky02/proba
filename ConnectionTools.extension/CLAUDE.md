@@ -5,7 +5,7 @@ Goal
 ----
 A pyRevit push button ("Connection Section") for looking at how two building components meet:
 
-1. The user picks the FIRST component (floor, wall, roof, ceiling, beam, column, or foundation).
+1. The user picks the FIRST component (floor, wall, roof, ceiling, beam, column, foundation, stair, railing, door, window, or curtain wall panel/mullion).
 2. The script finds every component that shares a boundary with it and offers only those as choices for the SECOND component. The choice is made from a list dialog, or by clicking in the model, limited to the highlighted candidates.
 3. A section is created through the middle of the connection, perpendicular to the joint line, so both components and their connection are visible. The section is named after both components, with an iteration number if the name already exists.
 
@@ -29,9 +29,10 @@ How "shares a boundary" is detected (script.py)
 ------------------------------------------------
 
 1. Coarse filter: a `BoundingBoxIntersectsFilter` on A's bounding box plus a tolerance, limited to the configured categories.
-2. Face contact: A planar face of A and a planar face of B count as touching when their normals are opposite, they lie in the same plane (within `CONTACT_TOL_MM`), and sample points of one face project onto the other. Joined elements are detected this way, because Revit cuts their geometry so the faces touch.
-3. Overlap: if no face contact is found but the elements clash (`ElementIntersectsElementFilter`), the intersection solid is used instead.
-4. Result: each candidate gets a `Contact` object with `kind` (side/top/bottom/overlap), `origin` (middle of the contact region), `joint_dir` (horizontal direction along the joint), and `length`.
+2. Host: if one element is a `FamilyInstance` hosted directly on the other (a door/window in a wall, a railing on a stair), that's the contact — checked before any geometry, since Revit typically cuts an opening for the hosted element so its solid doesn't actually overlap or share a clean coplanar face with the host.
+3. Face contact: A planar face of A and a planar face of B count as touching when their normals are opposite, they lie in the same plane (within `CONTACT_TOL_MM`), and sample points of one face project onto the other. Joined elements are detected this way, because Revit cuts their geometry so the faces touch.
+4. Overlap: if neither of the above applies but the elements clash (`ElementIntersectsElementFilter`), the intersection solid is used instead.
+5. Result: each candidate gets a `Contact` object with `kind` (side/top/bottom/overlap/host), `origin` (middle of the contact region), `joint_dir` (horizontal direction along the joint), and `length`.
 
 The section looks ALONG `joint_dir`, with its cut plane through `origin`. Element A is placed on the left side of the view.
 
@@ -54,7 +55,8 @@ Status: needs verification in Revit
 * [ ] Floor on wall (top/bottom contact): the section should be perpendicular to the wall's length.
 * [ ] Wall to wall at a corner or T-junction. This case is likely weak, because the section is vertical and a plan callout might suit it better.
 * [ ] Sloped roofs or floors (a non-horizontal contact face).
-* [ ] Performance on big models or elements with many faces.
+* [ ] Performance on big models or elements with many faces (stairs especially — many small tread/riser/stringer solids).
+* [ ] New categories (stairs, railings, doors, windows, curtain wall panels/mullions): confirm `_detect_host_contact` correctly picks up door/window-in-wall and railing-on-stair connections, and that stair-to-floor landings still work through face/overlap detection.
 * [ ] The candidate list labels are readable, and "pick" mode works.
 * [x] `ViewSection.CreateSection` rejects `ViewFamily.Detail` directly ("The ViewFamilyType must be a Section ViewFamily" — confirmed in Revit). `resolve_creation_type()` now creates with any Section-family type and switches to the requested Detail type afterwards with `ChangeTypeId`, mirroring what Revit's own type selector allows on an existing section. Needs a real test to confirm `ChangeTypeId` itself succeeds across families.
 * [ ] "Create all N connections" batch mode: confirm section naming stays unique and non-conflicting when many sections are created in the same transaction, and that the view left active at the end is a sensible one.

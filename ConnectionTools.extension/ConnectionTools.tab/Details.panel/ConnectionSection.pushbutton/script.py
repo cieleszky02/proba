@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """Create a section through the connection between two building components.
 
-Pick a first component (floor, wall, roof, ceiling, beam, column or
-foundation), then pick a second one that touches it. A new section view is
-created through the middle of the shared joint, looking along it, so both
+Pick a first component (floor, wall, roof, ceiling, beam, column,
+foundation, stair, railing, door, window, or curtain wall panel/mullion),
+then pick a second one that touches it. A new section view is created
+through the middle of the shared joint, looking along it, so both
 components and their connection are visible.
 """
 
@@ -34,6 +35,12 @@ CATEGORIES = [
     DB.BuiltInCategory.OST_StructuralColumns,
     DB.BuiltInCategory.OST_Columns,
     DB.BuiltInCategory.OST_StructuralFoundation,
+    DB.BuiltInCategory.OST_Stairs,
+    DB.BuiltInCategory.OST_StairsRailing,
+    DB.BuiltInCategory.OST_Doors,
+    DB.BuiltInCategory.OST_Windows,
+    DB.BuiltInCategory.OST_CurtainWallPanels,
+    DB.BuiltInCategory.OST_CurtainWallMullions,
 ]
 
 BBOX_TOL_MM = 50.0        # how far to grow A's bounding box when looking for neighbours
@@ -170,8 +177,8 @@ def pick_first_element():
         ref = uidoc.Selection.PickObject(
             ObjectType.Element,
             sel_filter,
-            "Select the FIRST component (floor, wall, roof, ceiling, beam, "
-            "column or foundation)"
+            "Select the FIRST component (wall, floor, roof, ceiling, beam, "
+            "column, foundation, stair, railing, door, window, curtain panel/mullion)"
         )
     except OperationCanceledException:
         return None
@@ -334,10 +341,51 @@ def _classify_kind(normal_a):
 class Contact(object):
     def __init__(self, element, kind, origin, joint_dir, length):
         self.element = element
-        self.kind = kind                # "side" | "top" | "bottom" | "overlap"
+        self.kind = kind                # "side" | "top" | "bottom" | "overlap" | "host"
         self.origin = origin            # XYZ, middle of the contact region
         self.joint_dir = joint_dir      # XYZ, horizontal unit vector along the joint
         self.length = length            # feet
+
+
+def _host_of(element):
+    if isinstance(element, DB.FamilyInstance):
+        return element.Host
+    return None
+
+
+def _hosted_joint_dir(host):
+    """The host's own running direction (a wall's length, say), so a
+    section through a door/window cuts across the host the same way a
+    floor-on-wall contact does. Falls back to a fixed direction when the
+    host has no simple location curve (e.g. hosted in a floor or roof)."""
+    location = getattr(host, "Location", None)
+    if isinstance(location, DB.LocationCurve):
+        curve = location.Curve
+        direction = curve.GetEndPoint(1) - curve.GetEndPoint(0)
+        return _horizontal(direction, DB.XYZ.BasisX)
+    return DB.XYZ.BasisX
+
+
+def _detect_host_contact(element_a, element_b):
+    """Doors, windows, railings and similar hosted family instances always
+    touch their host, but Revit usually cuts an opening for them so their
+    solids don't actually overlap or share a clean coplanar face the way
+    two floors or a floor-on-wall contact would. Element.Host is a direct,
+    reliable signal for this case, so it's checked before any geometry."""
+    if _host_of(element_b) is not None and _host_of(element_b).Id == element_a.Id:
+        hosted, host = element_b, element_a
+    elif _host_of(element_a) is not None and _host_of(element_a).Id == element_b.Id:
+        hosted, host = element_a, element_b
+    else:
+        return None
+
+    bbox = get_bounding_box(hosted)
+    if bbox is None:
+        return None
+    origin = bbox.Min.Add(bbox.Max).Multiply(0.5)
+    joint_dir = _hosted_joint_dir(host)
+    length = max(bbox.Max.X - bbox.Min.X, bbox.Max.Y - bbox.Min.Y, bbox.Max.Z - bbox.Min.Z)
+    return Contact(element_b, "host", origin, joint_dir, length)
 
 
 def _detect_face_contact(element_a, element_b):
@@ -402,6 +450,9 @@ def _detect_overlap_contact(element_a, element_b):
 
 
 def detect_contact(element_a, element_b):
+    contact = _detect_host_contact(element_a, element_b)
+    if contact is not None:
+        return contact
     contact = _detect_face_contact(element_a, element_b)
     if contact is not None:
         return contact
@@ -524,8 +575,9 @@ def choose_contacts(contacts):
     all of them), or an empty list if the user cancelled."""
     if not contacts:
         forms.alert(
-            "No neighbouring floor, wall, roof, ceiling, beam, column or "
-            "foundation was found touching the selected element.",
+            "No neighbouring component (wall, floor, roof, ceiling, beam, "
+            "column, foundation, stair, railing, door, window, or curtain "
+            "panel/mullion) was found touching the selected element.",
             title="Connection Section"
         )
         return []
@@ -723,8 +775,9 @@ def create_section_view(element_a, contact, creation_type, final_type):
 def main():
     output.show()
     output.print_md(
-        "**Select the FIRST component** — floor, wall, roof, ceiling, "
-        "beam, column or foundation — in the model. "
+        "**Select the FIRST component** — wall, floor, roof, ceiling, beam, "
+        "column, foundation, stair, railing, door, window, or curtain wall "
+        "panel/mullion — in the model. "
         "(The same prompt also shows in Revit's status bar / next to the cursor.)"
     )
 

@@ -1,6 +1,7 @@
 title: Connection Section
 tooltip: >
-  Pick two touching building components (floor, wall, roof, ceiling, beam,
-  column or foundation) and create a section through their connection,
+  Pick two touching building components (wall, floor, roof, ceiling, beam,
+  column, foundation, stair, railing, door, window, or curtain wall
+  panel/mullion) and create a section through their connection,
   perpendicular to the shared joint.
 author: ConnectionTools
