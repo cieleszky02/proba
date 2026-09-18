@@ -44,10 +44,10 @@ SECTION_WIDTH_MM = 1200.0   # minimum crop box width, centred on the joint origi
 SECTION_TOP_MM = 600.0      # crop box extends this far above the combined elements
 SECTION_BOTTOM_MM = 600.0   # ... and this far below
 
-VIEW_FAMILY_TYPE_NAME = None   # None = use the first available Section type
+VIEW_FAMILY_TYPE_NAME = None   # None = ask the user which Section type to use
 VIEW_TEMPLATE_NAME = None      # None = no template applied
 
-NAME_PREFIX = "Connection"     # section names look like "Connection - Wall 123 to Floor 456"
+NAME_PREFIX = "Connection Detail"   # names look like "Connection Detail Basic Wall / Floor Generic"
 
 
 def mm(value):
@@ -374,6 +374,17 @@ def element_label(element):
     return "{} {}".format(category_name, element.Id)
 
 
+def type_name(element):
+    """The element's type name (e.g. a wall or floor type), falling back to
+    `element_label` if it has none."""
+    type_id = element.GetTypeId()
+    if type_id != DB.ElementId.InvalidElementId:
+        element_type = doc.GetElement(type_id)
+        if element_type is not None and element_type.Name:
+            return element_type.Name
+    return element_label(element)
+
+
 def _contact_label(contact):
     element = contact.element
     length_mm = int(round(to_mm(contact.length)))
@@ -446,18 +457,35 @@ def choose_contact(contacts):
 
 # --------------------------------------------------------------- SECTION ---
 
-def get_section_type():
+def choose_section_type():
+    """Ask which of the project's existing Section view types to use
+    (e.g. Section / Section Detail / Section Detail Number), unless
+    VIEW_FAMILY_TYPE_NAME pins one, or only one type exists."""
     section_types = [
         t for t in DB.FilteredElementCollector(doc).OfClass(DB.ViewFamilyType)
         if t.ViewFamily == DB.ViewFamily.Section
     ]
     if not section_types:
+        forms.alert("No Section view type found in this project.", title="Connection Section")
         return None
+
     if VIEW_FAMILY_TYPE_NAME:
         for view_type in section_types:
             if view_type.Name == VIEW_FAMILY_TYPE_NAME:
                 return view_type
-    return section_types[0]
+
+    if len(section_types) == 1:
+        return section_types[0]
+
+    lookup = dict((view_type.Name, view_type) for view_type in section_types)
+    chosen = forms.SelectFromList.show(
+        sorted(lookup.keys()),
+        title="Select the section view type",
+        button_name="Use this type"
+    )
+    if not chosen:
+        return None
+    return lookup[chosen]
 
 
 def _find_view_template(name):
@@ -538,7 +566,7 @@ def build_section_box(element_a, element_b, contact):
 
 
 def unique_section_name(name_a, name_b):
-    base = "{} - {} to {}".format(NAME_PREFIX, name_a, name_b)
+    base = "{} {} / {}".format(NAME_PREFIX, name_a, name_b)
     existing = set(
         v.Name for v in DB.FilteredElementCollector(doc).OfClass(DB.ViewSection)
     )
@@ -554,13 +582,12 @@ def unique_section_name(name_a, name_b):
 
 
 def create_connection_section(element_a, element_b, contact):
-    view_family_type = get_section_type()
+    view_family_type = choose_section_type()
     if view_family_type is None:
-        forms.alert("No Section view type found in this project.", title="Connection Section")
         return None
 
     section_box = build_section_box(element_a, element_b, contact)
-    name = unique_section_name(element_label(element_a), element_label(element_b))
+    name = unique_section_name(type_name(element_a), type_name(element_b))
 
     with revit.Transaction("Create Connection Section"):
         section_view = DB.ViewSection.CreateSection(doc, view_family_type.Id, section_box)
