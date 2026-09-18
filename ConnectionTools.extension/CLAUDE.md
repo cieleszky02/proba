@@ -54,6 +54,8 @@ Status: needs verification in Revit
 * [ ] Sloped roofs or floors (a non-horizontal contact face).
 * [ ] Performance on big models or elements with many faces.
 * [ ] The candidate list labels are readable, and "pick" mode works.
+* [ ] `ViewSection.CreateSection` is assumed to accept a `ViewFamily.Detail` type the same way it accepts `ViewFamily.Section` (both are `ViewSection` under the hood). Confirm "Detail" types create cleanly, not just "Section"/"Section Detail"/"Section Detail Number".
+* [ ] "Create all N connections" batch mode: confirm section naming stays unique and non-conflicting when many sections are created in the same transaction, and that the view left active at the end is a sensible one.
 
 Roadmap / ideas
 -----------------

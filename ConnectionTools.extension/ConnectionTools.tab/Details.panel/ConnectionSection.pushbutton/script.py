@@ -445,42 +445,58 @@ def _pick_contact_in_model(contacts):
     return by_id.get(str(ref.ElementId))
 
 
-def choose_contact(contacts):
+def choose_contacts(contacts):
+    """Return the list of Contact objects to create sections for (possibly
+    all of them), or an empty list if the user cancelled."""
     if not contacts:
         forms.alert(
             "No neighbouring floor, wall, roof, ceiling, beam, column or "
             "foundation was found touching the selected element.",
             title="Connection Section"
         )
-        return None
+        return []
 
     if len(contacts) == 1:
-        return contacts[0]
+        return contacts
 
+    all_option = "Create all {} connections".format(len(contacts))
     mode = forms.CommandSwitchWindow.show(
-        ["Pick in model", "Choose from list"],
+        ["Pick in model", "Choose from list", all_option],
         message="{} candidates found. How do you want to choose the second "
                  "component?".format(len(contacts))
     )
     if mode is None:
-        return None
+        return []
+    if mode == all_option:
+        return contacts
     if mode == "Pick in model":
-        return _pick_contact_in_model(contacts)
-    return _pick_contact_from_list(contacts)
+        contact = _pick_contact_in_model(contacts)
+    else:
+        contact = _pick_contact_from_list(contacts)
+    return [contact] if contact else []
 
 
 # --------------------------------------------------------------- SECTION ---
 
+SECTION_LIKE_FAMILIES = (DB.ViewFamily.Section, DB.ViewFamily.Detail)
+
+
 def choose_section_type():
-    """Ask which of the project's existing Section view types to use
-    (e.g. Section / Section Detail / Section Detail Number), unless
-    VIEW_FAMILY_TYPE_NAME pins one, or only one type exists."""
+    """Ask which of the project's existing Section or Detail View types to
+    use (e.g. Section / Section Detail / Section Detail Number / Detail),
+    unless VIEW_FAMILY_TYPE_NAME pins one, or only one type exists.
+
+    Both families are created the same way (ViewSection.CreateSection);
+    Detail is just a smaller-scale, callout-style Section under the hood."""
     section_types = [
         t for t in DB.FilteredElementCollector(doc).OfClass(DB.ViewFamilyType)
-        if t.ViewFamily == DB.ViewFamily.Section
+        if t.ViewFamily in SECTION_LIKE_FAMILIES
     ]
     if not section_types:
-        forms.alert("No Section view type found in this project.", title="Connection Section")
+        forms.alert(
+            "No Section or Detail View type found in this project.",
+            title="Connection Section"
+        )
         return None
 
     if VIEW_FAMILY_TYPE_NAME:
@@ -595,22 +611,19 @@ def unique_section_name(name_a, name_b):
         counter += 1
 
 
-def create_connection_section(element_a, element_b, contact):
-    view_family_type = choose_section_type()
-    if view_family_type is None:
-        return None
-
+def create_section_view(element_a, contact, view_family_type):
+    """Create one section/detail view for a single contact. Must be called
+    inside an open transaction."""
+    element_b = contact.element
     section_box = build_section_box(element_a, element_b, contact)
     name = unique_section_name(type_name(element_a), type_name(element_b))
 
-    with revit.Transaction("Create Connection Section"):
-        section_view = DB.ViewSection.CreateSection(doc, view_family_type.Id, section_box)
-        set_name(section_view, name)
-        if VIEW_TEMPLATE_NAME:
-            template = _find_view_template(VIEW_TEMPLATE_NAME)
-            if template is not None:
-                section_view.ViewTemplateId = template.Id
-
+    section_view = DB.ViewSection.CreateSection(doc, view_family_type.Id, section_box)
+    set_name(section_view, name)
+    if VIEW_TEMPLATE_NAME:
+        template = _find_view_template(VIEW_TEMPLATE_NAME)
+        if template is not None:
+            section_view.ViewTemplateId = template.Id
     return section_view
 
 
@@ -625,23 +638,31 @@ def main():
     candidates = find_candidates(element_a)
     output.print_md("Found **{}** touching candidate(s).".format(len(candidates)))
 
-    contact = choose_contact(candidates)
-    if contact is None:
+    contacts = choose_contacts(candidates)
+    if not contacts:
         return
 
-    element_b = contact.element
-    output.print_md(
-        "**Second component:** {} — {} contact, {:.0f} mm long".format(
-            element_label(element_b), contact.kind, to_mm(contact.length)
-        )
-    )
-
-    section_view = create_connection_section(element_a, element_b, contact)
-    if section_view is None:
+    view_family_type = choose_section_type()
+    if view_family_type is None:
         return
 
-    uidoc.ActiveView = section_view
-    output.print_md("Created section **{}**.".format(get_name(section_view)))
+    created_views = []
+    with revit.Transaction("Create Connection Section(s)"):
+        for contact in contacts:
+            section_view = create_section_view(element_a, contact, view_family_type)
+            created_views.append(section_view)
+            output.print_md(
+                "Created **{}** — {} contact with {}, {:.0f} mm long".format(
+                    get_name(section_view), contact.kind,
+                    element_label(contact.element), to_mm(contact.length)
+                )
+            )
+
+    if not created_views:
+        return
+
+    uidoc.ActiveView = created_views[-1]
+    output.print_md("Done — created **{}** connection section(s).".format(len(created_views)))
 
 
 main()
