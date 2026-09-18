@@ -3,11 +3,13 @@ ConnectionTools – pyRevit extension
 
 Goal
 ----
-A pyRevit push button ("Connection Section") for looking at how two building components meet:
+A pyRevit push button ("Connection Section") for documenting how building components meet, in bulk, without picking elements one at a time:
 
-1. The user picks the FIRST component (floor, wall, roof, ceiling, beam, column, foundation, stair, railing, door, window, or curtain wall panel/mullion).
-2. The script finds every component that shares a boundary with it and offers only those as choices for the SECOND component. The choice is made from a list dialog, or by clicking in the model, limited to the highlighted candidates.
-3. A section is created through the middle of the connection, perpendicular to the joint line, so both components and their connection are visible. The section is named after both components, with an iteration number if the name already exists.
+1. The user filters by category, then multi-selects one or more family types in it (e.g. every window type, or a specific wall type) — no element picking.
+2. Every instance of those types in the model is checked against every other configured component. Each not-yet-documented connection found (see "already documented" below) becomes a job to create a view for.
+3. Most connections (floor-to-floor, floor-on-wall, a door/window in its host wall, a stair landing on a floor, ...) only make sense as a vertical Section/Detail. A wall/column-to-wall/column side contact (a corner or T-junction) could be either a Section/Detail or a horizontal Plan callout, so the user is asked, per connection, which fits.
+4. The user picks which existing Section/Detail view type to create with, and — separately, since a template only applies to a matching view type — which view template (if any) to apply to the Section/Detail views and to the Plan callouts.
+5. A view is created through the middle of each connection, perpendicular to the joint line (or, for a Plan job, a callout on the connection's level's Floor Plan view). Views are named after both components' types, with an iteration number if the name already exists, and tagged so the same pair is never offered or documented again.
 
 See `docs/images/` for the user's sketches of the intended behaviour. Read them before changing geometry logic.
 
@@ -36,7 +38,17 @@ How "shares a boundary" is detected (script.py)
 
 The section looks ALONG `joint_dir`, with its cut plane through `origin`. Element A is placed on the left side of the view.
 
-Every created section/detail view is tagged with an Extensible Storage entity recording the two element ids it documents (`tag_connection`). On the next run, `documented_pairs()` reads those tags back from every `ViewSection` in the model and `main()` drops already-documented pairs from the candidate list before offering it — so once a connection has a section, it stops being offered (and re-documented) on later runs, even in a different session. Deleting the view naturally un-documents the pair, since the tag lives on the view itself.
+Every created view (Section, Detail, or Plan callout) is tagged with an Extensible Storage entity recording the two element ids it documents (`tag_connection`). On the next run, `documented_pairs()` reads those tags back from every `View` in the model and `main()` drops already-documented pairs before offering them — so once a connection has a view, it stops being offered (and re-documented) on later runs, even in a different session. Deleting the view naturally un-documents the pair, since the tag lives on the view itself. `gather_unique_connections()` also dedupes within a single run, so a connection between two elements that are both in the selected type set is only found (and only asked about) once, not once from each side.
+
+Section/Detail vs. Plan
+------------------------
+
+`is_ambiguous_orientation()` flags a connection as needing a per-connection choice only when it is a `"side"` contact (see below) between two elements both in `VERTICAL_CATEGORIES` (walls, columns, curtain panels/mullions) — the classic wall/column corner or T-junction. Everything else is Section/Detail-only:
+
+* `"top"`/`"bottom"` (e.g. floor on wall) and `"host"` (a door/window in its host) always read naturally as a vertical cut.
+* A `"side"` contact where at least one element isn't in `VERTICAL_CATEGORIES` (e.g. two floors meeting at an edge) is also Section/Detail-only — the ambiguity is specifically about two vertical, full-height elements meeting edge-on, where looking down in plan shows the joint just as well as cutting across it.
+
+For a Plan job, `create_plan_callout()` finds the Floor Plan view already in the project for the connection's level (nearest `Level` by elevation to the contact origin) and adds a callout on it with `ViewSection.CreateCallout`, using that Floor Plan's own `ViewFamilyType` (so the callout's family always matches its owner view). If no Floor Plan view exists yet for that level, the job is skipped with a note in the output instead of failing the whole run.
 
 Hard constraints
 -----------------
@@ -53,21 +65,22 @@ Status: needs verification in Revit
 * [ ] Section box convention: the code assumes the section box `Transform.Origin` sits on the cut plane (local `Z = 0`), with `Min.Z` a small near-clip buffer and `Max.Z` the far clip depth. Confirm the cut goes through the joint and does not look away from it.
 * [ ] Floor next to floor (side contact): the section should be perpendicular to the shared edge.
 * [ ] Floor on wall (top/bottom contact): the section should be perpendicular to the wall's length.
-* [ ] Wall to wall at a corner or T-junction. This case is likely weak, because the section is vertical and a plan callout might suit it better.
 * [ ] Sloped roofs or floors (a non-horizontal contact face).
-* [ ] Performance on big models or elements with many faces (stairs especially — many small tread/riser/stringer solids).
+* [ ] Performance on big models or elements with many faces (stairs especially — many small tread/riser/stringer solids) and on a category/type filter that matches a large number of instances (one `find_candidates` geometry pass per instance).
 * [ ] New categories (stairs, railings, doors, windows, curtain wall panels/mullions): confirm `_detect_host_contact` correctly picks up door/window-in-wall and railing-on-stair connections, and that stair-to-floor landings still work through face/overlap detection.
-* [ ] The candidate list labels are readable, and "pick" mode works.
 * [x] `ViewSection.CreateSection` rejects `ViewFamily.Detail` directly ("The ViewFamilyType must be a Section ViewFamily" — confirmed in Revit). `resolve_creation_type()` now creates with any Section-family type and switches to the requested Detail type afterwards with `ChangeTypeId`, mirroring what Revit's own type selector allows on an existing section. Needs a real test to confirm `ChangeTypeId` itself succeeds across families.
-* [ ] "Create all N connections" batch mode: confirm section naming stays unique and non-conflicting when many sections are created in the same transaction, and that the view left active at the end is a sensible one.
-* [ ] Extensible Storage "already documented" tracking (`tag_connection` / `documented_pairs`): confirm the schema round-trips correctly (`entity.Set[str]`/`Get[str]`, `AddSimpleField(name, str)`), that already-documented pairs actually disappear from the candidate list on a second run, and that this still works after closing and reopening the model.
+* [ ] Extensible Storage "already documented" tracking (`tag_connection` / `documented_pairs`): confirm the schema round-trips correctly (`entity.Set[str]`/`Get[str]`, `AddSimpleField(name, str)`), that already-documented pairs actually disappear on a second run, and that this still works after closing and reopening the model.
+* [ ] **New, higher-risk since the last test:** the whole category/type picker flow (`choose_category`, `choose_types`, `instances_of_types`) — untested end to end.
+* [ ] **New, higher-risk:** `create_plan_callout()` / `ViewSection.CreateCallout`. This is the least certain piece in the file: confirm it actually accepts a `ViewFamily.FloorPlan` type (not just Section/Detail) and produces a genuine, live plan-style callout rather than throwing or producing something else. If it turns out `CreateCallout` only accepts Section/Detail types, the wall/column-corner "Plan" option needs a different approach (e.g. a horizontal Section, which reuses the already-tested `build_section_box`/`CreateSection` path with a straight-down `view_dir` instead of a genuine plan).
+* [ ] `is_ambiguous_orientation()` / `VERTICAL_CATEGORIES`: confirm a wall-corner side contact is actually flagged (offering Section vs. Plan), and that a floor-to-floor side contact is not.
+* [ ] `choose_view_template()`: confirm templates are correctly filtered by `ViewType` (Section/Detail/FloorPlan) and that applying one to a freshly created Section, Detail, and Plan callout each succeed.
 
 Roadmap / ideas
 -----------------
 
 1. Let the user pick the section position along the joint instead of using the midpoint. Options include `PickPoint` on a work plane, or several sections along long joints.
-2. Handle vertical joints (wall corners) with a horizontal plan callout instead of a section.
-3. Add an options dialog (`pyrevit.forms`) for depth, width, scale, and template. Persist the settings with `script.get_config()`, and open settings with Shift+Click.
-4. Support linked models (`RevitLinkInstance` and `ReferenceIntersector`), so components from structural or MEP links can be chosen.
-5. Tag both elements and add material or layer tags in the new section. Optionally place the section on a "Connection details" sheet, reusing the RoomSheet button's sheet logic.
-6. Move the geometry helpers into `lib/` and share them with other buttons.
+2. Add an options dialog (`pyrevit.forms`) for depth, width, and scale, alongside the existing view-type/template prompts. Persist the settings with `script.get_config()`, and open settings with Shift+Click.
+3. Support linked models (`RevitLinkInstance` and `ReferenceIntersector`), so components from structural or MEP links can be chosen.
+4. Tag both elements and add material or layer tags in the new view. Optionally place it on a "Connection details" sheet, reusing the RoomSheet button's sheet logic.
+5. Move the geometry helpers into `lib/` and share them with other buttons.
+6. Let the category/type filter step (`choose_category`/`choose_types`) select across more than one category at once, instead of one category per run.

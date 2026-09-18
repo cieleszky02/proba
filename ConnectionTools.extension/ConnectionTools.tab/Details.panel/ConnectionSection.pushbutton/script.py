@@ -1,18 +1,18 @@
 # -*- coding: utf-8 -*-
-"""Create a section through the connection between two building components.
+"""Create section/detail/plan views for every connection of a set of types.
 
-Pick a first component (floor, wall, roof, ceiling, beam, column,
-foundation, stair, railing, door, window, or curtain wall panel/mullion),
-then pick a second one that touches it. A new section view is created
-through the middle of the shared joint, looking along it, so both
-components and their connection are visible.
+Pick a category, then one or more family types in it (e.g. every window
+type). Every instance of those types in the model is checked against every
+other configured component; each not-yet-documented connection found gets
+its own view, created through the middle of the joint. Wall/column-to-
+wall/column connections (a corner or T-junction) can be a Plan callout
+instead of a vertical Section/Detail, asked per connection since either
+can be right depending on the case.
 """
 
 import math
 
 from Autodesk.Revit.DB.ExtensibleStorage import AccessLevel, Entity, Schema, SchemaBuilder
-from Autodesk.Revit.Exceptions import OperationCanceledException
-from Autodesk.Revit.UI.Selection import ISelectionFilter, ObjectType
 from System import Guid
 from System.Collections.Generic import List
 
@@ -119,13 +119,15 @@ def tag_connection(section_view, element_a, element_b):
 
 
 def documented_pairs():
-    """Every element-id pair that already has a section/detail view,
+    """Every element-id pair that already has a section/detail/plan view,
     read back from whatever already exists in the model."""
     schema = Schema.Lookup(CONNECTION_SCHEMA_GUID)
     pairs = set()
     if schema is None:
         return pairs
-    for view in DB.FilteredElementCollector(doc).OfClass(DB.ViewSection):
+    for view in DB.FilteredElementCollector(doc).OfClass(DB.View):
+        if view.IsTemplate:
+            continue
         entity = view.GetEntity(schema)
         if not entity.IsValid():
             continue
@@ -136,53 +138,69 @@ def documented_pairs():
     return pairs
 
 
-# ------------------------------------------------------------- SELECTION ---
+# ------------------------------------------------------------ TYPE PICKER ---
 
-class CategorySelectionFilter(ISelectionFilter):
-    """Only allow picking elements whose category is in an explicit set."""
-
-    def __init__(self, allowed_category_ids):
-        self._ids = list(allowed_category_ids)
-
-    def AllowElement(self, element):
-        category = element.Category
-        if category is None:
-            return False
-        return any(category.Id == cid for cid in self._ids)
-
-    def AllowReference(self, reference, position):
-        return True
-
-
-class ElementIdSelectionFilter(ISelectionFilter):
-    """Only allow picking elements from an explicit set of ElementIds."""
-
-    def __init__(self, allowed_ids):
-        self._ids = list(allowed_ids)
-
-    def AllowElement(self, element):
-        return any(element.Id == eid for eid in self._ids)
-
-    def AllowReference(self, reference, position):
-        return True
-
-
-def category_ids():
-    return [DB.ElementId(bic) for bic in CATEGORIES]
-
-
-def pick_first_element():
-    sel_filter = CategorySelectionFilter(category_ids())
-    try:
-        ref = uidoc.Selection.PickObject(
-            ObjectType.Element,
-            sel_filter,
-            "Select the FIRST component (wall, floor, roof, ceiling, beam, "
-            "column, foundation, stair, railing, door, window, curtain panel/mullion)"
-        )
-    except OperationCanceledException:
+def choose_category():
+    """Ask which of the configured categories to filter types from."""
+    lookup = {}
+    for bic in CATEGORIES:
+        category = DB.Category.GetCategory(doc, bic)
+        name = category.Name if category is not None else str(bic)
+        lookup[name] = bic
+    chosen = forms.SelectFromList.show(
+        sorted(lookup.keys()),
+        title="Select a category",
+        button_name="Next"
+    )
+    if not chosen:
         return None
-    return doc.GetElement(ref.ElementId)
+    return lookup[chosen]
+
+
+def type_label(element_type):
+    family_name = element_type.FamilyName
+    name = get_name(element_type)
+    if family_name:
+        return "{} - {}".format(family_name, name)
+    return name
+
+
+def types_in_category(bic):
+    category_filter = DB.ElementCategoryFilter(bic)
+    return list(
+        DB.FilteredElementCollector(doc)
+        .WherePasses(category_filter)
+        .WhereElementIsElementType()
+    )
+
+
+def choose_types(bic):
+    """Multi-select the family types (within one category) to gather
+    instances of."""
+    types = types_in_category(bic)
+    if not types:
+        forms.alert("No types found for that category.", title="Connection Section")
+        return []
+
+    lookup = dict((type_label(t), t) for t in types)
+    chosen = forms.SelectFromList.show(
+        sorted(lookup.keys()),
+        title="Select type(s)",
+        button_name="Use these types",
+        multiselect=True
+    )
+    if not chosen:
+        return []
+    return [lookup[name] for name in chosen]
+
+
+def instances_of_types(bic, type_ids):
+    id_set = set(str(tid) for tid in type_ids)
+    category_filter = DB.ElementCategoryFilter(bic)
+    collector = DB.FilteredElementCollector(doc) \
+        .WherePasses(category_filter) \
+        .WhereElementIsNotElementType()
+    return [e for e in collector if str(e.GetTypeId()) in id_set]
 
 
 # --------------------------------------------------------------- GEOMETRY ---
@@ -487,6 +505,71 @@ def find_candidates(element_a):
     return candidates
 
 
+def gather_unique_connections(seed_elements):
+    """(element_a, Contact) for every connection touching any of the seed
+    elements, each unordered pair appearing once even if both of its
+    elements are seeds (so it isn't found, and later documented, twice)."""
+    seen_pairs = set()
+    connections = []
+    for seed in seed_elements:
+        for contact in find_candidates(seed):
+            pair_key = frozenset((str(seed.Id), str(contact.element.Id)))
+            if pair_key in seen_pairs:
+                continue
+            seen_pairs.add(pair_key)
+            connections.append((seed, contact))
+    return connections
+
+
+# Categories treated as "vertical" for deciding whether a side contact
+# could be shown as a horizontal Plan callout instead of a vertical
+# Section/Detail (e.g. two walls meeting at a corner). A floor-to-floor
+# side contact stays Section-only, since neither element is in this set.
+VERTICAL_CATEGORIES = (
+    DB.BuiltInCategory.OST_Walls,
+    DB.BuiltInCategory.OST_StructuralColumns,
+    DB.BuiltInCategory.OST_Columns,
+    DB.BuiltInCategory.OST_CurtainWallMullions,
+    DB.BuiltInCategory.OST_CurtainWallPanels,
+)
+
+
+def _is_vertical_category(element):
+    if element.Category is None:
+        return False
+    return any(
+        element.Category.Id == DB.ElementId(bic) for bic in VERTICAL_CATEGORIES
+    )
+
+
+def is_ambiguous_orientation(element_a, contact):
+    """True for a side contact between two vertical elements (a wall/column
+    corner or T-junction), where a horizontal Plan callout can show the
+    connection at least as well as a vertical Section/Detail."""
+    return (
+        contact.kind == "side"
+        and _is_vertical_category(element_a)
+        and _is_vertical_category(contact.element)
+    )
+
+
+def choose_view_kind(element_a, contact):
+    """Ask whether one ambiguous connection should get a Section/Detail or
+    a Plan callout. Returns "section", "plan", or None if skipped."""
+    label = "{} ↔ {}".format(
+        family_type_label(element_a), family_type_label(contact.element)
+    )
+    choice = forms.CommandSwitchWindow.show(
+        ["Section/Detail", "Plan", "Skip"],
+        message="{}: which view fits this connection?".format(label)
+    )
+    if choice == "Section/Detail":
+        return "section"
+    if choice == "Plan":
+        return "plan"
+    return None
+
+
 # ------------------------------------------------------------------- UI ---
 
 def element_label(element):
@@ -522,84 +605,6 @@ def family_type_label(element):
         if get_name(element_type):
             parts.append(get_name(element_type))
     return ", ".join(parts)
-
-
-def _contact_label(contact):
-    element = contact.element
-    length_mm = int(round(to_mm(contact.length)))
-    return "{} - {} contact, {} mm (id {})".format(
-        family_type_label(element), contact.kind, length_mm, element.Id
-    )
-
-
-def _pick_contact_from_list(contacts):
-    lookup = {}
-    labels = []
-    for contact in contacts:
-        label = _contact_label(contact)
-        labels.append(label)
-        lookup[label] = contact
-
-    chosen = forms.SelectFromList.show(
-        sorted(labels),
-        title="Select the SECOND component",
-        button_name="Create Section"
-    )
-    if not chosen:
-        return None
-    return lookup[chosen]
-
-
-def _pick_contact_in_model(contacts):
-    allowed_ids = [contact.element.Id for contact in contacts]
-    by_id = dict((str(contact.element.Id), contact) for contact in contacts)
-
-    previous_selection = list(uidoc.Selection.GetElementIds())
-    uidoc.Selection.SetElementIds(List[DB.ElementId](allowed_ids))
-    try:
-        ref = uidoc.Selection.PickObject(
-            ObjectType.Element,
-            ElementIdSelectionFilter(allowed_ids),
-            "Click the SECOND component (highlighted candidates only)"
-        )
-    except OperationCanceledException:
-        return None
-    finally:
-        uidoc.Selection.SetElementIds(List[DB.ElementId](previous_selection))
-
-    return by_id.get(str(ref.ElementId))
-
-
-def choose_contacts(contacts):
-    """Return the list of Contact objects to create sections for (possibly
-    all of them), or an empty list if the user cancelled."""
-    if not contacts:
-        forms.alert(
-            "No neighbouring component (wall, floor, roof, ceiling, beam, "
-            "column, foundation, stair, railing, door, window, or curtain "
-            "panel/mullion) was found touching the selected element.",
-            title="Connection Section"
-        )
-        return []
-
-    if len(contacts) == 1:
-        return contacts
-
-    all_option = "Create all {} connections".format(len(contacts))
-    mode = forms.CommandSwitchWindow.show(
-        ["Pick in model", "Choose from list", all_option],
-        message="{} candidates found. How do you want to choose the second "
-                 "component?".format(len(contacts))
-    )
-    if mode is None:
-        return []
-    if mode == all_option:
-        return contacts
-    if mode == "Pick in model":
-        contact = _pick_contact_in_model(contacts)
-    else:
-        contact = _pick_contact_from_list(contacts)
-    return [contact] if contact else []
 
 
 # --------------------------------------------------------------- SECTION ---
@@ -652,6 +657,42 @@ def _find_view_template(name):
         if view.IsTemplate and get_name(view) == name:
             return view
     return None
+
+
+# A template can only be applied to a view whose ViewType matches (Revit
+# groups templates by ViewType, not raw ViewFamily).
+VIEW_FAMILY_TO_VIEW_TYPE = {
+    DB.ViewFamily.Section: DB.ViewType.Section,
+    DB.ViewFamily.Detail: DB.ViewType.Detail,
+    DB.ViewFamily.FloorPlan: DB.ViewType.FloorPlan,
+}
+
+
+def choose_view_template(view_family):
+    """Ask which view template (if any) to apply to views of this family,
+    e.g. once for the Section/Detail views and once for the Plan callouts
+    in a batch. VIEW_TEMPLATE_NAME pins one without asking, as before."""
+    if VIEW_TEMPLATE_NAME:
+        return _find_view_template(VIEW_TEMPLATE_NAME)
+
+    wanted_view_type = VIEW_FAMILY_TO_VIEW_TYPE.get(view_family)
+    templates = [
+        v for v in DB.FilteredElementCollector(doc).OfClass(DB.View)
+        if v.IsTemplate and (wanted_view_type is None or v.ViewType == wanted_view_type)
+    ]
+    if not templates:
+        return None
+
+    lookup = dict((get_name(t), t) for t in templates)
+    options = ["(none)"] + sorted(lookup.keys())
+    chosen = forms.SelectFromList.show(
+        options,
+        title="Select a view template to apply (optional)",
+        button_name="Use this template"
+    )
+    if not chosen or chosen == "(none)":
+        return None
+    return lookup[chosen]
 
 
 def _combined_bbox(element_a, element_b):
@@ -727,7 +768,8 @@ def build_section_box(element_a, element_b, contact):
 def unique_section_name(name_a, name_b):
     base = "{} {} / {}".format(NAME_PREFIX, name_a, name_b)
     existing = set(
-        get_name(v) for v in DB.FilteredElementCollector(doc).OfClass(DB.ViewSection)
+        get_name(v) for v in DB.FilteredElementCollector(doc).OfClass(DB.View)
+        if not v.IsTemplate
     )
     if base not in existing:
         return base
@@ -754,7 +796,8 @@ def resolve_creation_type(view_family_type):
 
 def create_section_view(element_a, contact, creation_type, final_type):
     """Create one section/detail view for a single contact. Must be called
-    inside an open transaction."""
+    inside an open transaction. The caller applies a view template, if any
+    (see choose_view_template)."""
     element_b = contact.element
     section_box = build_section_box(element_a, element_b, contact)
     name = unique_section_name(type_name(element_a), type_name(element_b))
@@ -763,79 +806,195 @@ def create_section_view(element_a, contact, creation_type, final_type):
     if final_type.Id != creation_type.Id:
         section_view.ChangeTypeId(final_type.Id)
     set_name(section_view, name)
-    if VIEW_TEMPLATE_NAME:
-        template = _find_view_template(VIEW_TEMPLATE_NAME)
-        if template is not None:
-            section_view.ViewTemplateId = template.Id
     return section_view
+
+
+# ------------------------------------------------------------------ PLAN ---
+
+def _nearest_level(z):
+    levels = list(DB.FilteredElementCollector(doc).OfClass(DB.Level))
+    if not levels:
+        return None
+    return min(levels, key=lambda lvl: abs(lvl.Elevation - z))
+
+
+def _floor_plan_for_level(level):
+    for view in DB.FilteredElementCollector(doc).OfClass(DB.ViewPlan):
+        if view.IsTemplate or view.ViewType != DB.ViewType.FloorPlan:
+            continue
+        gen_level = view.GenLevel
+        if gen_level is not None and gen_level.Id == level.Id:
+            return view
+    return None
+
+
+def create_plan_callout(element_a, contact):
+    """Create a Plan callout, cropped around the joint, on the existing
+    Floor Plan view of the connection's level. Must be called inside an
+    open transaction. Returns (view, error_message) - view is None and
+    error_message is set when the callout couldn't be created (e.g. no
+    Floor Plan view exists yet for that level). The caller applies a view
+    template, if any (see choose_view_template)."""
+    element_b = contact.element
+    level = _nearest_level(contact.origin.Z)
+    if level is None:
+        return None, "no Level found in the project"
+
+    owner_view = _floor_plan_for_level(level)
+    if owner_view is None:
+        return None, "no Floor Plan view exists for level '{}'".format(get_name(level))
+
+    callout_type = doc.GetElement(owner_view.GetTypeId())
+    if callout_type is None:
+        return None, "the level's Floor Plan view has no view type"
+
+    half_width = mm(SECTION_WIDTH_MM) / 2.0
+    origin = contact.origin
+    point1 = DB.XYZ(origin.X - half_width, origin.Y - half_width, 0)
+    point2 = DB.XYZ(origin.X + half_width, origin.Y + half_width, 0)
+
+    callout_view = DB.ViewSection.CreateCallout(
+        doc, owner_view.Id, callout_type.Id, point1, point2
+    )
+    name = unique_section_name(type_name(element_a), type_name(element_b))
+    set_name(callout_view, name)
+    return callout_view, None
 
 
 # --------------------------------------------------------------------- ---
 
 def main():
     output.show()
+    output.print_md("**Filter which existing families and types to connect.**")
+
+    bic = choose_category()
+    if bic is None:
+        output.print_md("Cancelled — no category was selected.")
+        return
+
+    types = choose_types(bic)
+    if not types:
+        output.print_md("Cancelled — no type was selected.")
+        return
     output.print_md(
-        "**Select the FIRST component** — wall, floor, roof, ceiling, beam, "
-        "column, foundation, stair, railing, door, window, or curtain wall "
-        "panel/mullion — in the model. "
-        "(The same prompt also shows in Revit's status bar / next to the cursor.)"
+        "**Type(s):** {}".format(", ".join(type_label(t) for t in types))
     )
 
-    element_a = pick_first_element()
-    if element_a is None:
-        output.print_md("Cancelled — no first component was selected.")
+    seed_elements = instances_of_types(bic, [t.Id for t in types])
+    output.print_md("**{}** instance(s) of the selected type(s) found.".format(len(seed_elements)))
+    if not seed_elements:
         return
-    output.print_md("**First component:** {}".format(element_label(element_a)))
 
-    all_candidates = find_candidates(element_a)
+    raw_connections = gather_unique_connections(seed_elements)
     already_documented = documented_pairs()
-    candidates = [
-        c for c in all_candidates
-        if frozenset((str(element_a.Id), str(c.element.Id))) not in already_documented
+    connections = [
+        (a, c) for (a, c) in raw_connections
+        if frozenset((str(a.Id), str(c.element.Id))) not in already_documented
     ]
-    skipped = len(all_candidates) - len(candidates)
+    skipped = len(raw_connections) - len(connections)
     output.print_md(
-        "Found **{}** touching candidate(s){}.".format(
-            len(candidates),
+        "Found **{}** connection(s) to document{}.".format(
+            len(connections),
             " (**{}** already documented, skipped)".format(skipped) if skipped else ""
         )
     )
-
-    contacts = choose_contacts(candidates)
-    if not contacts:
+    if not connections:
         return
 
-    view_family_type = choose_section_type()
-    if view_family_type is None:
+    # A wall/column-to-wall/column side contact (a corner or T-junction)
+    # could be a vertical Section/Detail or a horizontal Plan callout;
+    # everything else (floor-to-floor, top/bottom, host, overlap) only
+    # makes sense as a Section/Detail.
+    section_jobs = []
+    plan_jobs = []
+    for element_a, contact in connections:
+        if is_ambiguous_orientation(element_a, contact):
+            kind = choose_view_kind(element_a, contact)
+            if kind is None:
+                continue
+        else:
+            kind = "section"
+        if kind == "plan":
+            plan_jobs.append((element_a, contact))
+        else:
+            section_jobs.append((element_a, contact))
+
+    if not section_jobs and not plan_jobs:
+        output.print_md("Nothing left to create.")
         return
 
-    creation_type = resolve_creation_type(view_family_type)
-    if creation_type is None:
-        forms.alert(
-            "No Section view type exists in this project to create the view "
-            "with (one is needed even to create a Detail View type).",
-            title="Connection Section"
-        )
+    creation_type = None
+    view_family_type = None
+    section_template = None
+    if section_jobs:
+        view_family_type = choose_section_type()
+        if view_family_type is None:
+            section_jobs = []
+        else:
+            creation_type = resolve_creation_type(view_family_type)
+            if creation_type is None:
+                forms.alert(
+                    "No Section view type exists in this project to create "
+                    "the view with (one is needed even to create a Detail "
+                    "View type).",
+                    title="Connection Section"
+                )
+                section_jobs = []
+            else:
+                section_template = choose_view_template(view_family_type.ViewFamily)
+
+    plan_template = None
+    if plan_jobs:
+        plan_template = choose_view_template(DB.ViewFamily.FloorPlan)
+
+    if not section_jobs and not plan_jobs:
         return
 
     created_views = []
-    with revit.Transaction("Create Connection Section(s)"):
-        for contact in contacts:
+    plan_failures = []
+    with revit.Transaction("Create Connection Views"):
+        for element_a, contact in section_jobs:
             section_view = create_section_view(element_a, contact, creation_type, view_family_type)
+            if section_template is not None:
+                section_view.ViewTemplateId = section_template.Id
             tag_connection(section_view, element_a, contact.element)
             created_views.append(section_view)
             output.print_md(
-                "Created **{}** — {} contact with {}, {:.0f} mm long".format(
+                "Created **{}** (section) — {} contact with {}, {:.0f} mm long".format(
                     get_name(section_view), contact.kind,
                     element_label(contact.element), to_mm(contact.length)
                 )
             )
 
+        for element_a, contact in plan_jobs:
+            callout_view, error = create_plan_callout(element_a, contact)
+            if callout_view is None:
+                plan_failures.append(
+                    "{} ↔ {}: {}".format(
+                        element_label(element_a), element_label(contact.element), error
+                    )
+                )
+                continue
+            if plan_template is not None:
+                callout_view.ViewTemplateId = plan_template.Id
+            tag_connection(callout_view, element_a, contact.element)
+            created_views.append(callout_view)
+            output.print_md(
+                "Created **{}** (plan callout) — {} contact with {}".format(
+                    get_name(callout_view), contact.kind, element_label(contact.element)
+                )
+            )
+
+    if plan_failures:
+        output.print_md("**Skipped {} plan callout(s):**".format(len(plan_failures)))
+        for note in plan_failures:
+            output.print_md("- {}".format(note))
+
     if not created_views:
         return
 
     uidoc.ActiveView = created_views[-1]
-    output.print_md("Done — created **{}** connection section(s).".format(len(created_views)))
+    output.print_md("Done — created **{}** connection view(s).".format(len(created_views)))
 
 
 main()

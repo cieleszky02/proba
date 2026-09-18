@@ -1,7 +1,8 @@
 title: Connection Section
 tooltip: >
-  Pick two touching building components (wall, floor, roof, ceiling, beam,
+  Filter by category and family type (wall, floor, roof, ceiling, beam,
   column, foundation, stair, railing, door, window, or curtain wall
-  panel/mullion) and create a section through their connection,
-  perpendicular to the shared joint.
+  panel/mullion), then create a Section, Detail, or Plan view for every
+  not-yet-documented connection those types have with the rest of the
+  model, through the middle of each joint.
 author: ConnectionTools
