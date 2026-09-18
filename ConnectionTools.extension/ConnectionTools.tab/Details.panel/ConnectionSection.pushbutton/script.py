@@ -58,12 +58,14 @@ VIEW_TEMPLATE_NAME = None      # None = no template applied
 
 NAME_PREFIX = "Connection Detail"   # names look like "Connection Detail Basic Wall / Floor Generic"
 
-# Extensible Storage schema used to remember which element pairs already
-# have a connection section, so they drop out of the candidate list on the
-# next run instead of being offered (and documented) again.
-CONNECTION_SCHEMA_GUID = Guid("794ce64a-88a4-4a01-8e8a-738d89795226")
-CONNECTION_SCHEMA_FIELD_A = "ElementAId"
-CONNECTION_SCHEMA_FIELD_B = "ElementBId"
+# Extensible Storage schema used to remember which TYPE pairs already have
+# a connection view. Dedup is by type, not by element instance: once one
+# door of a given type has a documented connection to a given wall type,
+# every other instance of that same door type in that same wall type is
+# skipped, since it would look like an identical, redundant view.
+CONNECTION_SCHEMA_GUID = Guid("992bc80e-f596-428c-8e0a-2162ab3e3faa")
+CONNECTION_SCHEMA_FIELD_A = "TypeAId"
+CONNECTION_SCHEMA_FIELD_B = "TypeBId"
 
 
 def mm(value):
@@ -92,8 +94,16 @@ def set_name(element, name):
 
 # ---------------------------------------------------------- CONNECTION LOG ---
 # Extensible Storage bookkeeping: tags each created section/detail view with
-# the pair of elements it documents, so already-documented pairs can be
-# dropped from the candidate list on later runs.
+# the pair of TYPES it documents, so already-documented type pairs can be
+# dropped before they're offered on later runs.
+
+def _type_key(element):
+    """The element's type id as a string, or its own id if it has no type.
+    Connections are deduped/tagged by TYPE, not by instance, so five doors
+    of the same type in the same wall type only need one documented view."""
+    element_type = _get_type(element)
+    return str(element_type.Id) if element_type is not None else str(element.Id)
+
 
 def _get_connection_schema():
     schema = Schema.Lookup(CONNECTION_SCHEMA_GUID)
@@ -109,17 +119,17 @@ def _get_connection_schema():
 
 
 def tag_connection(section_view, element_a, element_b):
-    """Record which two elements this view documents. Must be called
-    inside an open transaction."""
+    """Record which two TYPES this view documents. Must be called inside
+    an open transaction."""
     schema = _get_connection_schema()
     entity = Entity(schema)
-    entity.Set[str](CONNECTION_SCHEMA_FIELD_A, str(element_a.Id))
-    entity.Set[str](CONNECTION_SCHEMA_FIELD_B, str(element_b.Id))
+    entity.Set[str](CONNECTION_SCHEMA_FIELD_A, _type_key(element_a))
+    entity.Set[str](CONNECTION_SCHEMA_FIELD_B, _type_key(element_b))
     section_view.SetEntity(entity)
 
 
 def documented_pairs():
-    """Every element-id pair that already has a section/detail/plan view,
+    """Every type-id pair that already has a section/detail/plan view,
     read back from whatever already exists in the model."""
     schema = Schema.Lookup(CONNECTION_SCHEMA_GUID)
     pairs = set()
@@ -165,21 +175,32 @@ def type_label(element_type):
     return name
 
 
-def types_in_category(bic):
+def types_in_use(bic):
+    """Only the types (within one category) that have at least one
+    instance actually placed in the model — a type merely loaded into the
+    project but never placed isn't offered, since it has no connections."""
     category_filter = DB.ElementCategoryFilter(bic)
-    return list(
-        DB.FilteredElementCollector(doc)
-        .WherePasses(category_filter)
+    instances = DB.FilteredElementCollector(doc) \
+        .WherePasses(category_filter) \
+        .WhereElementIsNotElementType()
+    used_type_ids = set(str(instance.GetTypeId()) for instance in instances)
+
+    types = DB.FilteredElementCollector(doc) \
+        .WherePasses(category_filter) \
         .WhereElementIsElementType()
-    )
+    return [t for t in types if str(t.Id) in used_type_ids]
 
 
 def choose_types(bic):
-    """Multi-select the family types (within one category) to gather
-    instances of."""
-    types = types_in_category(bic)
+    """Multi-select the family types (within one category, and actually
+    placed in the model) to gather instances of."""
+    types = types_in_use(bic)
     if not types:
-        forms.alert("No types found for that category.", title="Connection Section")
+        forms.alert(
+            "No placed instances of any type in that category were found "
+            "in the model.",
+            title="Connection Section"
+        )
         return []
 
     lookup = dict((type_label(t), t) for t in types)
@@ -507,16 +528,17 @@ def find_candidates(element_a):
 
 def gather_unique_connections(seed_elements):
     """(element_a, Contact) for every connection touching any of the seed
-    elements, each unordered pair appearing once even if both of its
-    elements are seeds (so it isn't found, and later documented, twice)."""
-    seen_pairs = set()
+    elements, one per unordered TYPE pair — e.g. only the first of five
+    doors of the same type hosted in the same wall type is kept, since the
+    rest would produce an identical, redundant view."""
+    seen_type_pairs = set()
     connections = []
     for seed in seed_elements:
         for contact in find_candidates(seed):
-            pair_key = frozenset((str(seed.Id), str(contact.element.Id)))
-            if pair_key in seen_pairs:
+            pair_key = frozenset((_type_key(seed), _type_key(contact.element)))
+            if pair_key in seen_type_pairs:
                 continue
-            seen_pairs.add(pair_key)
+            seen_type_pairs.add(pair_key)
             connections.append((seed, contact))
     return connections
 
@@ -889,7 +911,7 @@ def main():
     already_documented = documented_pairs()
     connections = [
         (a, c) for (a, c) in raw_connections
-        if frozenset((str(a.Id), str(c.element.Id))) not in already_documented
+        if frozenset((_type_key(a), _type_key(c.element))) not in already_documented
     ]
     skipped = len(raw_connections) - len(connections)
     output.print_md(
