@@ -1,0 +1,7 @@
+title: Room Sheet
+tooltip: >
+  Select one or more rooms, then click to generate a sheet for each room:
+  a cropped floor plan (or callout), two sections through the room centre
+  (X and Y), and a 3D view with a section box, all placed on the sheet.
+  Names are derived from the room name; a shared iteration number is
+  appended to all of a room's views if a name or sheet number collides.

@@ -1,0 +1,573 @@
+# -*- coding: utf-8 -*-
+"""Create a sheet (plan/callout + 2 sections + 3D view) for each selected room.
+
+Select one or more rooms before clicking, or the tool will prompt you to
+pick them. For every room this creates a floor plan (or callout) cropped
+to the room, an X section and a Y section through the room centre, a 3D
+view with a section box around the room, and a sheet with all four views
+placed on it. All names are derived from the room name; if a name or the
+sheet number already exists, a shared iteration number is appended to
+every view of that room.
+
+Runtime: pyRevit / IronPython 2.7. No f-strings, no type hints.
+"""
+
+import traceback
+
+from pyrevit import revit, DB, script
+from Autodesk.Revit.DB.Architecture import Room
+from Autodesk.Revit.UI.Selection import ISelectionFilter, ObjectType
+
+output = script.get_output()
+logger = script.get_logger()
+
+doc = revit.doc
+uidoc = revit.uidoc
+
+
+# ---------------------------------------------------------------------------
+# CONFIG
+# ---------------------------------------------------------------------------
+
+# Plan / callout crop, offset beyond the room boundary.
+CROP_OFFSET_MM = 300.0
+USE_ROOM_SHAPE_CROP = True     # True: crop to room outline. False: rectangle.
+CROP_BOX_VISIBLE = False
+
+# Section extents, offset beyond the room in each direction.
+SECTION_SIDE_OFFSET_MM = 300.0     # left / right, beyond the room width
+SECTION_DEPTH_OFFSET_MM = 300.0    # far clip, beyond the room depth
+SECTION_TOP_OFFSET_MM = 600.0      # above the room's top
+SECTION_BOTTOM_OFFSET_MM = 300.0   # below the room's base
+
+# 3D view section box, offset beyond the room bounding box.
+BOX_3D_SIDE_OFFSET_MM = 300.0
+BOX_3D_TOP_OFFSET_MM = 600.0
+BOX_3D_BOTTOM_OFFSET_MM = 300.0
+
+PLAN_VIEW_SCALE = 50
+SECTION_VIEW_SCALE = 50
+
+# Substring (case-insensitive) to match a title block family name.
+# Leave as None to just use the first title block type found in the model.
+SHEET_TITLEBLOCK_FAMILY = None
+
+# Margin inside the title block (or fallback sheet area) reserved for the
+# viewport grid.
+SHEET_MARGIN_MM = 20.0
+# Fallback content area (roughly A1-ish) used only when the sheet has no
+# title block instance to measure.
+FALLBACK_SHEET_WIDTH_MM = 800.0
+FALLBACK_SHEET_HEIGHT_MM = 550.0
+
+VIEW_NAME_TEMPLATE = {
+    'plan': u"{room} - Plan",
+    'section_x': u"{room} - Section X",
+    'section_y': u"{room} - Section Y",
+    'view_3d': u"{room} - 3D",
+}
+
+ILLEGAL_NAME_CHARS = [
+    '\\', ':', '{', '}', '[', ']', '|', ';', '<', '>', '?', '`', '~',
+]
+
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+
+def mm(value):
+    """Millimeters to feet (Revit's internal length unit)."""
+    return value / 304.8
+
+
+def element_id_value(element_id):
+    """ElementId -> plain int. .IntegerValue is deprecated in 2024+."""
+    try:
+        return element_id.Value
+    except AttributeError:
+        return element_id.IntegerValue
+
+
+def sanitize_name(name):
+    result = name
+    for ch in ILLEGAL_NAME_CHARS:
+        result = result.replace(ch, '_')
+    result = result.strip()
+    if not result:
+        result = "Room"
+    return result
+
+
+def get_room_name(room):
+    param = room.get_Parameter(DB.BuiltInParameter.ROOM_NAME)
+    if param is not None and param.HasValue:
+        value = param.AsString()
+        if value:
+            return sanitize_name(value)
+    return "Room"
+
+
+# ---------------------------------------------------------------------------
+# Selection
+# ---------------------------------------------------------------------------
+
+class RoomSelectionFilter(ISelectionFilter):
+    def AllowElement(self, element):
+        return isinstance(element, Room)
+
+    def AllowReference(self, reference, position):
+        return False
+
+
+def get_selected_rooms():
+    current = revit.get_selection()
+    rooms = [el for el in current.elements if isinstance(el, Room)]
+    if rooms:
+        return rooms
+
+    try:
+        refs = uidoc.Selection.PickObjects(
+            ObjectType.Element,
+            RoomSelectionFilter(),
+            "Select one or more rooms, then click Finish",
+        )
+    except Exception:
+        # User cancelled the pick.
+        return []
+
+    picked = []
+    seen_ids = set()
+    for ref in refs:
+        el = doc.GetElement(ref.ElementId)
+        if isinstance(el, Room) and el.Id not in seen_ids:
+            picked.append(el)
+            seen_ids.add(el.Id)
+    return picked
+
+
+# ---------------------------------------------------------------------------
+# Naming / uniqueness
+# ---------------------------------------------------------------------------
+
+def collect_existing_view_names(document):
+    names = set()
+    for view in DB.FilteredElementCollector(document).OfClass(DB.View):
+        if isinstance(view, DB.ViewSheet):
+            continue
+        if view.IsTemplate:
+            continue
+        names.add(view.Name)
+    return names
+
+
+def collect_existing_sheet_numbers(document):
+    return set(
+        sheet.SheetNumber
+        for sheet in DB.FilteredElementCollector(document).OfClass(DB.ViewSheet)
+    )
+
+
+def resolve_names(base_name, taken_view_names, taken_sheet_numbers):
+    """Find the lowest shared suffix so plan/section/3D/sheet names are
+    all free at once. Mutates the taken_* sets to reserve the result."""
+    n = 0
+    while True:
+        suffix = u"" if n == 0 else u" {}".format(n)
+        candidate = u"{}{}".format(base_name, suffix)
+
+        names = {
+            'plan': VIEW_NAME_TEMPLATE['plan'].format(room=candidate),
+            'section_x': VIEW_NAME_TEMPLATE['section_x'].format(room=candidate),
+            'section_y': VIEW_NAME_TEMPLATE['section_y'].format(room=candidate),
+            'view_3d': VIEW_NAME_TEMPLATE['view_3d'].format(room=candidate),
+        }
+        sheet_number = sanitize_name(candidate)
+
+        view_names_free = all(
+            nm not in taken_view_names for nm in names.values()
+        )
+        sheet_number_free = sheet_number not in taken_sheet_numbers
+
+        if view_names_free and sheet_number_free:
+            names['sheet_name'] = candidate
+            names['sheet_number'] = sheet_number
+            taken_view_names.update(names[k] for k in
+                                     ('plan', 'section_x', 'section_y', 'view_3d'))
+            taken_sheet_numbers.add(sheet_number)
+            return names
+
+        n += 1
+
+
+# ---------------------------------------------------------------------------
+# View family type lookup
+# ---------------------------------------------------------------------------
+
+def find_view_family_type(document, view_family):
+    for vft in DB.FilteredElementCollector(document).OfClass(DB.ViewFamilyType):
+        if vft.ViewFamily == view_family:
+            return vft
+    return None
+
+
+def find_floor_plan_for_level(document, level_id):
+    for view in DB.FilteredElementCollector(document).OfClass(DB.ViewPlan):
+        if view.IsTemplate:
+            continue
+        if view.ViewType != DB.ViewType.FloorPlan:
+            continue
+        gen_level = view.GenLevel
+        if gen_level is not None and gen_level.Id == level_id:
+            return view
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Crop shapes
+# ---------------------------------------------------------------------------
+
+def rectangle_curve_loop(bbox_min, bbox_max, offset, z):
+    p0 = DB.XYZ(bbox_min.X - offset, bbox_min.Y - offset, z)
+    p1 = DB.XYZ(bbox_max.X + offset, bbox_min.Y - offset, z)
+    p2 = DB.XYZ(bbox_max.X + offset, bbox_max.Y + offset, z)
+    p3 = DB.XYZ(bbox_min.X - offset, bbox_max.Y + offset, z)
+    loop = DB.CurveLoop()
+    loop.Append(DB.Line.CreateBound(p0, p1))
+    loop.Append(DB.Line.CreateBound(p1, p2))
+    loop.Append(DB.Line.CreateBound(p2, p3))
+    loop.Append(DB.Line.CreateBound(p3, p0))
+    return loop
+
+
+def loop_is_counterclockwise(curve_loop):
+    """Shoelace sum on the loop's vertices, viewed from +Z."""
+    points = [curve.GetEndPoint(0) for curve in curve_loop]
+    count = len(points)
+    area = 0.0
+    for i in range(count):
+        p1 = points[i]
+        p2 = points[(i + 1) % count]
+        area += (p1.X * p2.Y - p2.X * p1.Y)
+    return area > 0
+
+
+def room_outline_curve_loop(room, offset):
+    options = DB.SpatialElementBoundaryOptions()
+    loops = room.GetBoundarySegments(options)
+    if not loops or not loops[0]:
+        return None
+
+    outer = loops[0]
+    curve_loop = DB.CurveLoop()
+    for segment in outer:
+        curve_loop.Append(segment.GetCurve())
+
+    # CreateViaOffset's sign is relative to the loop's winding direction,
+    # which Revit does not guarantee here, so we measure it instead of
+    # assuming it and flip the sign to always grow the loop outward.
+    signed_offset = offset if loop_is_counterclockwise(curve_loop) else -offset
+    try:
+        return DB.CurveLoop.CreateViaOffset(curve_loop, signed_offset, DB.XYZ.BasisZ)
+    except Exception:
+        logger.warning("Room shape offset failed, falling back to rectangle crop.")
+        return None
+
+
+def apply_crop_shape(view, curve_loop):
+    view.CropBoxActive = True
+    view.CropBoxVisible = CROP_BOX_VISIBLE
+    crop_manager = view.GetCropRegionShapeManager()
+    crop_manager.SetCropShape(curve_loop)
+
+
+# ---------------------------------------------------------------------------
+# View creation
+# ---------------------------------------------------------------------------
+
+def create_room_plan(document, plan_vft, room, room_bbox, level):
+    offset = mm(CROP_OFFSET_MM)
+    z = room_bbox.Min.Z
+
+    plan_view = None
+    parent_plan = find_floor_plan_for_level(document, level.Id)
+    if parent_plan is not None:
+        p1 = DB.XYZ(room_bbox.Min.X - offset, room_bbox.Min.Y - offset, z)
+        p2 = DB.XYZ(room_bbox.Max.X + offset, room_bbox.Max.Y + offset, z)
+        try:
+            plan_view = DB.ViewSection.CreateCallout(
+                document, plan_vft.Id, parent_plan.Id, p1, p2
+            )
+        except Exception:
+            logger.warning("Callout creation failed, falling back to a standalone floor plan.")
+            plan_view = None
+
+    if plan_view is None:
+        plan_view = DB.ViewPlan.Create(document, plan_vft.Id, level.Id)
+
+    crop_loop = None
+    if USE_ROOM_SHAPE_CROP:
+        crop_loop = room_outline_curve_loop(room, offset)
+    if crop_loop is None:
+        crop_loop = rectangle_curve_loop(room_bbox.Min, room_bbox.Max, offset, z)
+    apply_crop_shape(plan_view, crop_loop)
+
+    try:
+        plan_view.Scale = PLAN_VIEW_SCALE
+    except Exception:
+        pass
+
+    return plan_view
+
+
+def create_room_section(document, section_vft, room_bbox, center, axis):
+    """axis 'x': cut line along X, looking north (+Y).
+    axis 'y': cut line along Y, looking west (-X)."""
+    if axis == 'x':
+        basis_x = DB.XYZ.BasisX
+        basis_z = -DB.XYZ.BasisY               # view direction = +Y (north)
+        half_width = (room_bbox.Max.X - room_bbox.Min.X) / 2.0
+        half_depth = (room_bbox.Max.Y - room_bbox.Min.Y) / 2.0
+    else:
+        basis_x = DB.XYZ.BasisY
+        basis_z = DB.XYZ.BasisX                # view direction = -X (west)
+        half_width = (room_bbox.Max.Y - room_bbox.Min.Y) / 2.0
+        half_depth = (room_bbox.Max.X - room_bbox.Min.X) / 2.0
+
+    basis_y = DB.XYZ.BasisZ
+
+    transform = DB.Transform.Identity
+    transform.Origin = center
+    transform.BasisX = basis_x
+    transform.BasisY = basis_y
+    transform.BasisZ = basis_z
+
+    side_offset = mm(SECTION_SIDE_OFFSET_MM)
+    depth_offset = mm(SECTION_DEPTH_OFFSET_MM)
+    bottom_offset = mm(SECTION_BOTTOM_OFFSET_MM)
+    top_offset = mm(SECTION_TOP_OFFSET_MM)
+
+    section_box = DB.BoundingBoxXYZ()
+    section_box.Transform = transform
+    # Max.Z = 0 puts the cut plane exactly at the room centre (the
+    # transform's origin); Min.Z is the far clip, beyond the room's far
+    # side. See CLAUDE.md status checklist: verify against a real section.
+    section_box.Min = DB.XYZ(
+        -(half_width + side_offset),
+        room_bbox.Min.Z - center.Z - bottom_offset,
+        -(half_depth + depth_offset),
+    )
+    section_box.Max = DB.XYZ(
+        half_width + side_offset,
+        room_bbox.Max.Z - center.Z + top_offset,
+        0.0,
+    )
+
+    section_view = DB.ViewSection.CreateSection(document, section_vft.Id, section_box)
+    try:
+        section_view.Scale = SECTION_VIEW_SCALE
+    except Exception:
+        pass
+    return section_view
+
+
+def create_room_3d_view(document, view3d_vft, room_bbox):
+    view_3d = DB.View3D.CreateIsometric(document, view3d_vft.Id)
+
+    side_offset = mm(BOX_3D_SIDE_OFFSET_MM)
+    top_offset = mm(BOX_3D_TOP_OFFSET_MM)
+    bottom_offset = mm(BOX_3D_BOTTOM_OFFSET_MM)
+
+    box_3d = DB.BoundingBoxXYZ()
+    box_3d.Min = DB.XYZ(
+        room_bbox.Min.X - side_offset,
+        room_bbox.Min.Y - side_offset,
+        room_bbox.Min.Z - bottom_offset,
+    )
+    box_3d.Max = DB.XYZ(
+        room_bbox.Max.X + side_offset,
+        room_bbox.Max.Y + side_offset,
+        room_bbox.Max.Z + top_offset,
+    )
+    view_3d.SetSectionBox(box_3d)
+    view_3d.IsSectionBoxActive = True
+    return view_3d
+
+
+# ---------------------------------------------------------------------------
+# Sheet + layout
+# ---------------------------------------------------------------------------
+
+def find_titleblock_type_id(document):
+    collector = (
+        DB.FilteredElementCollector(document)
+        .OfCategory(DB.BuiltInCategory.OST_TitleBlocks)
+        .WhereElementIsElementType()
+    )
+    if SHEET_TITLEBLOCK_FAMILY:
+        needle = SHEET_TITLEBLOCK_FAMILY.lower()
+        for tb_type in collector:
+            if needle in tb_type.FamilyName.lower():
+                return tb_type.Id
+        return DB.ElementId.InvalidElementId
+
+    first = collector.FirstElement()
+    return first.Id if first else DB.ElementId.InvalidElementId
+
+
+def get_sheet_content_area(document, sheet):
+    margin = mm(SHEET_MARGIN_MM)
+    tb_instance = None
+    for el in (
+        DB.FilteredElementCollector(document, sheet.Id)
+        .OfCategory(DB.BuiltInCategory.OST_TitleBlocks)
+        .WhereElementIsNotElementType()
+    ):
+        tb_instance = el
+        break
+
+    if tb_instance is not None:
+        tb_bbox = tb_instance.get_BoundingBox(sheet)
+        if tb_bbox is not None:
+            return (
+                DB.XYZ(tb_bbox.Min.X + margin, tb_bbox.Min.Y + margin, 0),
+                DB.XYZ(tb_bbox.Max.X - margin, tb_bbox.Max.Y - margin, 0),
+            )
+
+    return (
+        DB.XYZ(margin, margin, 0),
+        DB.XYZ(mm(FALLBACK_SHEET_WIDTH_MM) - margin, mm(FALLBACK_SHEET_HEIGHT_MM) - margin, 0),
+    )
+
+
+def grid_centers(area_min, area_max):
+    width = area_max.X - area_min.X
+    height = area_max.Y - area_min.Y
+    cols = (area_min.X + width * 0.25, area_min.X + width * 0.75)
+    rows = (area_min.Y + height * 0.25, area_min.Y + height * 0.75)
+    return [
+        DB.XYZ(cols[0], rows[1], 0),   # top-left
+        DB.XYZ(cols[1], rows[1], 0),   # top-right
+        DB.XYZ(cols[0], rows[0], 0),   # bottom-left
+        DB.XYZ(cols[1], rows[0], 0),   # bottom-right
+    ]
+
+
+def place_views_on_sheet(document, sheet, views_in_order):
+    area_min, area_max = get_sheet_content_area(document, sheet)
+    centers = grid_centers(area_min, area_max)
+    for view, point in zip(views_in_order, centers):
+        if DB.Viewport.CanAddViewToSheet(document, sheet.Id, view.Id):
+            DB.Viewport.Create(document, sheet.Id, view.Id, point)
+        else:
+            logger.warning("Could not place view '{}' on sheet '{}'.".format(
+                view.Name, sheet.Name))
+
+
+# ---------------------------------------------------------------------------
+# Per-room orchestration
+# ---------------------------------------------------------------------------
+
+def create_room_sheet(document, room, vfts, taken_view_names, taken_sheet_numbers):
+    room_bbox = room.get_BoundingBox(None)
+    if room_bbox is None or room.Area <= 0:
+        raise Exception("Room has no valid geometry (unplaced or unbounded).")
+
+    level = document.GetElement(room.LevelId)
+    if level is None:
+        raise Exception("Room has no valid level.")
+
+    center = DB.XYZ(
+        (room_bbox.Min.X + room_bbox.Max.X) / 2.0,
+        (room_bbox.Min.Y + room_bbox.Max.Y) / 2.0,
+        (room_bbox.Min.Z + room_bbox.Max.Z) / 2.0,
+    )
+
+    base_name = get_room_name(room)
+    names = resolve_names(base_name, taken_view_names, taken_sheet_numbers)
+
+    plan_view = create_room_plan(document, vfts['plan'], room, room_bbox, level)
+    plan_view.Name = names['plan']
+
+    section_x = create_room_section(document, vfts['section'], room_bbox, center, 'x')
+    section_x.Name = names['section_x']
+
+    section_y = create_room_section(document, vfts['section'], room_bbox, center, 'y')
+    section_y.Name = names['section_y']
+
+    view_3d = create_room_3d_view(document, vfts['view_3d'], room_bbox)
+    view_3d.Name = names['view_3d']
+
+    titleblock_type_id = find_titleblock_type_id(document)
+    sheet = DB.ViewSheet.Create(document, titleblock_type_id)
+    sheet.Name = names['sheet_name']
+    sheet.SheetNumber = names['sheet_number']
+
+    place_views_on_sheet(document, sheet, [plan_view, view_3d, section_x, section_y])
+
+    return sheet
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    rooms = get_selected_rooms()
+    if not rooms:
+        output.print_md("**No rooms selected.** Nothing to do.")
+        return
+
+    vfts = {
+        'plan': find_view_family_type(doc, DB.ViewFamily.FloorPlan),
+        'section': find_view_family_type(doc, DB.ViewFamily.Section),
+        'view_3d': find_view_family_type(doc, DB.ViewFamily.ThreeDimensional),
+    }
+    missing = [key for key, vft in vfts.items() if vft is None]
+    if missing:
+        output.print_md(
+            "**Missing view family type(s) in this model:** {}".format(", ".join(missing))
+        )
+        return
+
+    taken_view_names = collect_existing_view_names(doc)
+    taken_sheet_numbers = collect_existing_sheet_numbers(doc)
+
+    created_sheets = []
+    failures = []
+
+    t = DB.Transaction(doc, "Create Room Sheet(s)")
+    t.Start()
+    try:
+        for room in rooms:
+            room_label = get_room_name(room)
+            try:
+                sheet = create_room_sheet(doc, room, vfts, taken_view_names, taken_sheet_numbers)
+                created_sheets.append(sheet)
+                output.print_md("Created sheet **{}** ({}) for room **{}**.".format(
+                    sheet.Name, sheet.SheetNumber, room_label))
+            except Exception:
+                failures.append((room_label, traceback.format_exc()))
+        t.Commit()
+    except Exception:
+        if t.HasStarted() and not t.HasEnded():
+            t.RollBack()
+        raise
+
+    if failures:
+        output.print_md("### Errors")
+        for room_label, tb in failures:
+            output.print_md("**Room: {}**".format(room_label))
+            output.print_md("```\n{}\n```".format(tb))
+
+    output.print_md("Done. {} sheet(s) created, {} failure(s).".format(
+        len(created_sheets), len(failures)))
+
+    if created_sheets:
+        try:
+            uidoc.ActiveView = created_sheets[-1]
+        except Exception:
+            pass
+
+
+main()
