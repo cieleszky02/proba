@@ -156,6 +156,14 @@ def get_selected_rooms():
 # View template picker
 # ---------------------------------------------------------------------------
 
+VIEW_TYPE_BY_KEY = {
+    'plan': DB.ViewType.FloorPlan,
+    'ceiling': DB.ViewType.CeilingPlan,
+    'section': DB.ViewType.Section,
+    'view_3d': DB.ViewType.ThreeD,
+}
+
+
 def collect_all_templates(document):
     return [v for v in DB.FilteredElementCollector(document).OfClass(DB.View) if v.IsTemplate]
 
@@ -171,15 +179,32 @@ def find_any_view_of_type(document, view_type):
     return None
 
 
+def create_scratch_view(document, key, vfts, level):
+    """A throwaway view of the given category, created purely so
+    View.IsValidViewTemplate() has something real to test against. Caller
+    is responsible for creating/discarding it inside its own transaction."""
+    if key in ('plan', 'ceiling'):
+        if level is None:
+            return None
+        return DB.ViewPlan.Create(document, vfts[key].Id, level.Id)
+    if key == 'section':
+        box = DB.BoundingBoxXYZ()
+        box.Min = DB.XYZ(-5.0, -5.0, -5.0)
+        box.Max = DB.XYZ(5.0, 5.0, 5.0)
+        return DB.ViewSection.CreateSection(document, vfts['section'].Id, box)
+    if key == 'view_3d':
+        return DB.View3D.CreateIsometric(document, vfts['view_3d'].Id)
+    return None
+
+
 def template_options_for(all_templates, view_type, sample_view):
     """(name, ElementId) pairs for templates applicable to view_type.
-    Prefers Revit's own View.IsValidViewTemplate() -- run against an
-    existing view of that type already in the project -- over matching
-    the template's own ViewType, since that exact-match rule turned out
-    not to reflect what Revit itself considers compatible (confirmed in
-    Revit: Section templates existed but the ViewType match found none of
-    them). Falls back to the ViewType match only when there's no existing
-    view of that type yet to test against."""
+    Prefers Revit's own View.IsValidViewTemplate() over matching the
+    template's own ViewType -- that exact-match rule turned out not to
+    reflect what Revit itself considers compatible (confirmed in Revit:
+    Section templates existed but the ViewType match found none of them).
+    Falls back to the ViewType match only when there's no sample view at
+    all to call IsValidViewTemplate() on."""
     if sample_view is not None:
         templates = [t for t in all_templates if sample_view.IsValidViewTemplate(t.Id)]
     else:
@@ -226,27 +251,49 @@ class ViewTemplatePickerWindow(forms.WPFWindow):
         self.Close()
 
 
-def choose_view_templates(document):
+def choose_view_templates(document, vfts):
     """One dialog with a dropdown per view type (Plan, Ceiling Plan,
     Section -- shared by both X and Y, 3D). Returns a dict of
     'plan'/'ceiling'/'section'/'view_3d' -> ElementId or None. Returns {}
     without showing anything if the model has no view templates at all;
-    returns None if the user cancelled."""
+    returns None if the user cancelled.
+
+    Filtering needs a real view of each type to call IsValidViewTemplate()
+    on (see template_options_for). Existing views in the project are used
+    when available; for any type with none yet, a throwaway view is
+    created purely to test against and then discarded via RollBack --
+    never committed, never visible to the user."""
     all_templates = collect_all_templates(document)
-    template_options = {
-        'plan': template_options_for(
-            all_templates, DB.ViewType.FloorPlan,
-            find_any_view_of_type(document, DB.ViewType.FloorPlan)),
-        'ceiling': template_options_for(
-            all_templates, DB.ViewType.CeilingPlan,
-            find_any_view_of_type(document, DB.ViewType.CeilingPlan)),
-        'section': template_options_for(
-            all_templates, DB.ViewType.Section,
-            find_any_view_of_type(document, DB.ViewType.Section)),
-        'view_3d': template_options_for(
-            all_templates, DB.ViewType.ThreeD,
-            find_any_view_of_type(document, DB.ViewType.ThreeD)),
-    }
+    if not all_templates:
+        return {}
+
+    sample_views = {}
+    for key, view_type in VIEW_TYPE_BY_KEY.items():
+        sample_views[key] = find_any_view_of_type(document, view_type)
+    missing_keys = [key for key, view in sample_views.items() if view is None]
+
+    if missing_keys:
+        level = DB.FilteredElementCollector(document).OfClass(DB.Level).FirstElement()
+        t = DB.Transaction(document, "RoomTools template compatibility check (discarded)")
+        t.Start()
+        try:
+            for key in missing_keys:
+                try:
+                    sample_views[key] = create_scratch_view(document, key, vfts, level)
+                except Exception:
+                    sample_views[key] = None
+            template_options = {
+                key: template_options_for(all_templates, view_type, sample_views[key])
+                for key, view_type in VIEW_TYPE_BY_KEY.items()
+            }
+        finally:
+            t.RollBack()
+    else:
+        template_options = {
+            key: template_options_for(all_templates, view_type, sample_views[key])
+            for key, view_type in VIEW_TYPE_BY_KEY.items()
+        }
+
     if not any(template_options.values()):
         return {}
 
@@ -719,7 +766,7 @@ def main():
         )
         return
 
-    template_ids = choose_view_templates(doc)
+    template_ids = choose_view_templates(doc, vfts)
     if template_ids is None:
         output.print_md("**Cancelled.** No sheets created.")
         return
