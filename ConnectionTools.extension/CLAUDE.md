@@ -35,6 +35,8 @@ How "shares a boundary" is detected (script.py)
 
 The section looks ALONG `joint_dir`, with its cut plane through `origin`. Element A is placed on the left side of the view.
 
+Every created section/detail view is tagged with an Extensible Storage entity recording the two element ids it documents (`tag_connection`). On the next run, `documented_pairs()` reads those tags back from every `ViewSection` in the model and `main()` drops already-documented pairs from the candidate list before offering it — so once a connection has a section, it stops being offered (and re-documented) on later runs, even in a different session. Deleting the view naturally un-documents the pair, since the tag lives on the view itself.
+
 Hard constraints
 -----------------
 
@@ -56,6 +58,7 @@ Status: needs verification in Revit
 * [ ] The candidate list labels are readable, and "pick" mode works.
 * [x] `ViewSection.CreateSection` rejects `ViewFamily.Detail` directly ("The ViewFamilyType must be a Section ViewFamily" — confirmed in Revit). `resolve_creation_type()` now creates with any Section-family type and switches to the requested Detail type afterwards with `ChangeTypeId`, mirroring what Revit's own type selector allows on an existing section. Needs a real test to confirm `ChangeTypeId` itself succeeds across families.
 * [ ] "Create all N connections" batch mode: confirm section naming stays unique and non-conflicting when many sections are created in the same transaction, and that the view left active at the end is a sensible one.
+* [ ] Extensible Storage "already documented" tracking (`tag_connection` / `documented_pairs`): confirm the schema round-trips correctly (`entity.Set[str]`/`Get[str]`, `AddSimpleField(name, str)`), that already-documented pairs actually disappear from the candidate list on a second run, and that this still works after closing and reopening the model.
 
 Roadmap / ideas
 -----------------

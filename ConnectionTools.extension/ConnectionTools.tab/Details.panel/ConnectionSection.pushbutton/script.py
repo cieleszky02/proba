@@ -9,8 +9,10 @@ components and their connection are visible.
 
 import math
 
+from Autodesk.Revit.DB.ExtensibleStorage import AccessLevel, Entity, Schema, SchemaBuilder
 from Autodesk.Revit.Exceptions import OperationCanceledException
 from Autodesk.Revit.UI.Selection import ISelectionFilter, ObjectType
+from System import Guid
 from System.Collections.Generic import List
 
 from pyrevit import revit, DB, forms, script
@@ -49,6 +51,13 @@ VIEW_TEMPLATE_NAME = None      # None = no template applied
 
 NAME_PREFIX = "Connection Detail"   # names look like "Connection Detail Basic Wall / Floor Generic"
 
+# Extensible Storage schema used to remember which element pairs already
+# have a connection section, so they drop out of the candidate list on the
+# next run instead of being offered (and documented) again.
+CONNECTION_SCHEMA_GUID = Guid("794ce64a-88a4-4a01-8e8a-738d89795226")
+CONNECTION_SCHEMA_FIELD_A = "ElementAId"
+CONNECTION_SCHEMA_FIELD_B = "ElementBId"
+
 
 def mm(value):
     """Millimetres -> feet (Revit internal units)."""
@@ -72,6 +81,52 @@ def get_name(element):
 
 def set_name(element, name):
     DB.Element.Name.SetValue(element, name)
+
+
+# ---------------------------------------------------------- CONNECTION LOG ---
+# Extensible Storage bookkeeping: tags each created section/detail view with
+# the pair of elements it documents, so already-documented pairs can be
+# dropped from the candidate list on later runs.
+
+def _get_connection_schema():
+    schema = Schema.Lookup(CONNECTION_SCHEMA_GUID)
+    if schema is not None:
+        return schema
+    builder = SchemaBuilder(CONNECTION_SCHEMA_GUID)
+    builder.SetSchemaName("ConnectionToolsLink")
+    builder.SetReadAccessLevel(AccessLevel.Public)
+    builder.SetWriteAccessLevel(AccessLevel.Public)
+    builder.AddSimpleField(CONNECTION_SCHEMA_FIELD_A, str)
+    builder.AddSimpleField(CONNECTION_SCHEMA_FIELD_B, str)
+    return builder.Finish()
+
+
+def tag_connection(section_view, element_a, element_b):
+    """Record which two elements this view documents. Must be called
+    inside an open transaction."""
+    schema = _get_connection_schema()
+    entity = Entity(schema)
+    entity.Set[str](CONNECTION_SCHEMA_FIELD_A, str(element_a.Id))
+    entity.Set[str](CONNECTION_SCHEMA_FIELD_B, str(element_b.Id))
+    section_view.SetEntity(entity)
+
+
+def documented_pairs():
+    """Every element-id pair that already has a section/detail view,
+    read back from whatever already exists in the model."""
+    schema = Schema.Lookup(CONNECTION_SCHEMA_GUID)
+    pairs = set()
+    if schema is None:
+        return pairs
+    for view in DB.FilteredElementCollector(doc).OfClass(DB.ViewSection):
+        entity = view.GetEntity(schema)
+        if not entity.IsValid():
+            continue
+        id_a = entity.Get[str](CONNECTION_SCHEMA_FIELD_A)
+        id_b = entity.Get[str](CONNECTION_SCHEMA_FIELD_B)
+        if id_a and id_b:
+            pairs.add(frozenset((id_a, id_b)))
+    return pairs
 
 
 # ------------------------------------------------------------- SELECTION ---
@@ -388,22 +443,41 @@ def element_label(element):
     return "{} {}".format(category_name, element.Id)
 
 
+def _get_type(element):
+    type_id = element.GetTypeId()
+    if type_id == DB.ElementId.InvalidElementId:
+        return None
+    return doc.GetElement(type_id)
+
+
 def type_name(element):
     """The element's type name (e.g. a wall or floor type), falling back to
     `element_label` if it has none."""
-    type_id = element.GetTypeId()
-    if type_id != DB.ElementId.InvalidElementId:
-        element_type = doc.GetElement(type_id)
-        if element_type is not None and get_name(element_type):
-            return get_name(element_type)
+    element_type = _get_type(element)
+    if element_type is not None and get_name(element_type):
+        return get_name(element_type)
     return element_label(element)
+
+
+def family_type_label(element):
+    """"Category, Family name, Type name" - e.g.
+    "Walls, Basic Wall, Generic - 200mm"."""
+    category_name = element.Category.Name if element.Category else "Element"
+    parts = [category_name]
+    element_type = _get_type(element)
+    if element_type is not None:
+        if element_type.FamilyName:
+            parts.append(element_type.FamilyName)
+        if get_name(element_type):
+            parts.append(get_name(element_type))
+    return ", ".join(parts)
 
 
 def _contact_label(contact):
     element = contact.element
     length_mm = int(round(to_mm(contact.length)))
     return "{} - {} contact, {} mm (id {})".format(
-        element_label(element), contact.kind, length_mm, element.Id
+        family_type_label(element), contact.kind, length_mm, element.Id
     )
 
 
@@ -652,8 +726,19 @@ def main():
         return
     output.print_md("**First component:** {}".format(element_label(element_a)))
 
-    candidates = find_candidates(element_a)
-    output.print_md("Found **{}** touching candidate(s).".format(len(candidates)))
+    all_candidates = find_candidates(element_a)
+    already_documented = documented_pairs()
+    candidates = [
+        c for c in all_candidates
+        if frozenset((str(element_a.Id), str(c.element.Id))) not in already_documented
+    ]
+    skipped = len(all_candidates) - len(candidates)
+    output.print_md(
+        "Found **{}** touching candidate(s){}.".format(
+            len(candidates),
+            " (**{}** already documented, skipped)".format(skipped) if skipped else ""
+        )
+    )
 
     contacts = choose_contacts(candidates)
     if not contacts:
@@ -676,6 +761,7 @@ def main():
     with revit.Transaction("Create Connection Section(s)"):
         for contact in contacts:
             section_view = create_section_view(element_a, contact, creation_type, view_family_type)
+            tag_connection(section_view, element_a, contact.element)
             created_views.append(section_view)
             output.print_md(
                 "Created **{}** — {} contact with {}, {:.0f} mm long".format(
