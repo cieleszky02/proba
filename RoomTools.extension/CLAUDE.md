@@ -45,32 +45,18 @@ RoomTools.extension/
 
 ## Status: needs verification in Revit
 
-* [~] Section box position. FIXED (needs retest): a real Revit test on a
-      round room showed both section cut lines drawn tangent to the room's
-      edge, offset from centre by ~the room's own radius, instead of
-      through the centroid. The offset's exact magnitude matched
-      `Min.Z`'s value, not `Max.Z` (which was set to `0.0`, expecting
-      *that* to be the on-centre bound) — so empirically Revit anchors the
-      drawn cut line to local `Min.Z`, the opposite of the usual "near
-      clip" assumption. Fixed by pinning `Min.Z` to (almost) the
-      transform's origin instead of `Max.Z`; see the implementation notes
-      below. NOT yet re-verified, and specifically: confirm (a) the cut
-      line now passes through the centroid, and (b) the section's actual
-      content still shows the intended side of the room (X looking north,
-      Y looking west) — swapping which bound sits at the origin only
-      changes *where the line is drawn*; it does not touch `BasisZ`, so
-      the view-direction reasoning is unchanged, but this combination
-      (`Min.Z` at origin + unchanged `BasisZ`) has not itself been tested.
-      If the section content turns out to show the wrong side of the room
-      (south instead of north, or east instead of west), negate `basis_z`
-      for that axis in `create_room_section`.
+* [x] Section box position. Confirmed fixed in Revit: cut lines now pass
+      through the room centroid (both on a round room). `Min.Z` is pinned
+      to (almost) the transform's origin, `Max.Z` is the far bound; see
+      implementation notes below for why it's `Min.Z` and not `Max.Z`.
+      Not separately re-confirmed: whether each section's actual content
+      shows the intended cardinal side (X north, Y west) — if that's ever
+      found to be backwards, negate `basis_z` for the affected axis in
+      `create_room_section` (do not touch Min.Z/Max.Z again).
 * [ ] Callout creation with `ViewSection.CreateCallout` using the FloorPlan
       and CeilingPlan types, plus the fallback to `ViewPlan.Create`.
 * [x] Plan / RCP / 3D / sheet, on a basic rectangular room — confirmed
-      working in Revit. (Sections were also "working" in this test in the
-      sense of not erroring, but the off-centre bug above almost
-      certainly affected them too; it just wasn't noticed until the round
-      room made it visually obvious.)
+      working in Revit.
 * [ ] RCP: confirmed callout-vs-crop-shape mechanics work on a round room;
       not yet tested on a room with no existing ceiling plan for its level
       (the `ViewPlan.Create` fallback path).
