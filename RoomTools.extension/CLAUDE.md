@@ -83,12 +83,23 @@ RoomTools.extension/
       rooms with the same name.
 * [ ] Layout on the sheet, with and without a title block.
 * [ ] Rooms on levels with base offset or upper limit set.
-* [ ] View template picker dialog (new): not yet tested in Revit. Check
-      that (a) the dialog shows up after room selection, before anything
-      is created, (b) each dropdown only lists templates of the matching
-      `ViewType` (a project with only Floor Plan templates should leave
-      Ceiling Plan/Section/3D as `<None>`-only), (c) the chosen templates
-      actually land on the created views, and (d) Cancel creates nothing.
+* [~] View template picker dialog. Dialog itself confirmed showing up at
+      the right time (after room selection, before anything is created).
+      BUG found and fixed: the Section dropdown came up empty despite the
+      project having plenty of Section-type templates (confirmed via
+      Revit's own "Assign View Template" dialog) -- filtering candidate
+      templates by exact `template.ViewType == DB.ViewType.Section` found
+      none of them, for a reason not fully pinned down. Switched to
+      Revit's own authoritative `View.IsValidViewTemplate(templateId)`,
+      tested against any existing non-template view of that type already
+      in the project (`find_any_view_of_type`) -- your prior test runs
+      already left several Section views in the document, so this has a
+      view to test against. Falls back to the old exact-`ViewType` match
+      only when no view of that type exists yet anywhere in the project.
+      NOT yet re-verified: confirm the Section dropdown (and, for good
+      measure, Plan/Ceiling/3D too, in case they had the same latent bug
+      without it being as visible) now lists the applicable templates, and
+      that OK still lands the right template on each created view.
 
 ## Roadmap / ideas
 
@@ -161,18 +172,28 @@ RoomTools.extension/
   `ViewType` passed in differ.
 * `choose_view_templates()` runs once, before the transaction (dialogs and
   transactions don't mix well, and there's no reason to ask once per
-  room). It filters candidate templates by exact `View.ViewType` match
-  against the view being created (`FloorPlan`/`CeilingPlan`/`Section`/
-  `ThreeD`) rather than the more general `View.IsValidViewTemplate()`,
-  since that instance method needs an already-created view to call it on
-  and we want the dialog to run before anything is created. Section X and
-  Section Y share one dropdown/key (`'section'`) since both are
-  `ViewType.Section`. Returns `{}` (skip the dialog silently) if the
-  project has zero templates across all four types, or `None` if the user
-  hits Cancel — `main()` distinguishes those and aborts the whole run only
-  on the latter. `ViewTemplatePickerWindow` is a `pyrevit.forms.WPFWindow`
-  loading `ViewTemplatePicker.xaml`; its `Name="..."` elements (not
-  `x:Name`) become plain attributes on `self` (`self.plan_combo`, etc.) via
+  room). Candidate templates are filtered per view type with
+  `View.IsValidViewTemplate(templateId)` -- Revit's own authoritative
+  compatibility check -- called on an existing non-template view of that
+  type already in the project (`find_any_view_of_type`), not on the
+  templates' own `ViewType` property. That was the original approach and
+  it under-matched in Revit (confirmed: a project with several Section
+  templates got an empty Section dropdown), for a reason not fully
+  diagnosed -- possibly template `ViewType` not mapping 1:1 to view
+  `ViewType`, possibly something else. `IsValidViewTemplate` needs an
+  actual view instance to call it on, which is why `find_any_view_of_type`
+  looks for one already sitting in the project rather than creating one
+  (that would need a transaction, and the dialog runs before the
+  transaction starts). Falls back to the old exact-`ViewType` match only
+  when the project has no view of that type at all yet -- a fresh project
+  before this tool has ever run once. Section X and Section Y share one
+  dropdown/key (`'section'`) since both are `ViewType.Section`. Returns
+  `{}` (skip the dialog silently) if the project has zero templates across
+  all four types, or `None` if the user hits Cancel — `main()`
+  distinguishes those and aborts the whole run only on the latter.
+  `ViewTemplatePickerWindow` is a `pyrevit.forms.WPFWindow` loading
+  `ViewTemplatePicker.xaml`; its `Name="..."` elements (not `x:Name`)
+  become plain attributes on `self` (`self.plan_combo`, etc.) via
   IronPython's `wpf.LoadComponent`, and the XAML's `Click="ok_click"` /
   `Click="cancel_click"` bind directly to the matching methods on this
   class.

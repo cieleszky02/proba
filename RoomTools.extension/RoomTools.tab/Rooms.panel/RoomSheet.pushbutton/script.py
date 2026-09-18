@@ -156,20 +156,34 @@ def get_selected_rooms():
 # View template picker
 # ---------------------------------------------------------------------------
 
-def collect_templates_by_view_type(document):
-    by_type = {}
+def collect_all_templates(document):
+    return [v for v in DB.FilteredElementCollector(document).OfClass(DB.View) if v.IsTemplate]
+
+
+def find_any_view_of_type(document, view_type):
+    """A non-template view of the given ViewType already in the project,
+    used as the "am I compatible with this template" test subject."""
     for view in DB.FilteredElementCollector(document).OfClass(DB.View):
-        if not view.IsTemplate:
+        if view.IsTemplate:
             continue
-        by_type.setdefault(view.ViewType, []).append(view)
-    return by_type
+        if view.ViewType == view_type:
+            return view
+    return None
 
 
-def template_options_for(by_type, view_type):
-    """(name, ElementId) pairs for templates whose ViewType matches --
-    the same rule Revit's own "Apply Template" pickers use, so a Floor
-    Plan view only ever offers Floor Plan templates, and so on."""
-    templates = by_type.get(view_type, [])
+def template_options_for(all_templates, view_type, sample_view):
+    """(name, ElementId) pairs for templates applicable to view_type.
+    Prefers Revit's own View.IsValidViewTemplate() -- run against an
+    existing view of that type already in the project -- over matching
+    the template's own ViewType, since that exact-match rule turned out
+    not to reflect what Revit itself considers compatible (confirmed in
+    Revit: Section templates existed but the ViewType match found none of
+    them). Falls back to the ViewType match only when there's no existing
+    view of that type yet to test against."""
+    if sample_view is not None:
+        templates = [t for t in all_templates if sample_view.IsValidViewTemplate(t.Id)]
+    else:
+        templates = [t for t in all_templates if t.ViewType == view_type]
     options = [(t.Name, t.Id) for t in templates]
     options.sort(key=lambda pair: pair[0].lower())
     return options
@@ -218,12 +232,20 @@ def choose_view_templates(document):
     'plan'/'ceiling'/'section'/'view_3d' -> ElementId or None. Returns {}
     without showing anything if the model has no view templates at all;
     returns None if the user cancelled."""
-    by_type = collect_templates_by_view_type(document)
+    all_templates = collect_all_templates(document)
     template_options = {
-        'plan': template_options_for(by_type, DB.ViewType.FloorPlan),
-        'ceiling': template_options_for(by_type, DB.ViewType.CeilingPlan),
-        'section': template_options_for(by_type, DB.ViewType.Section),
-        'view_3d': template_options_for(by_type, DB.ViewType.ThreeD),
+        'plan': template_options_for(
+            all_templates, DB.ViewType.FloorPlan,
+            find_any_view_of_type(document, DB.ViewType.FloorPlan)),
+        'ceiling': template_options_for(
+            all_templates, DB.ViewType.CeilingPlan,
+            find_any_view_of_type(document, DB.ViewType.CeilingPlan)),
+        'section': template_options_for(
+            all_templates, DB.ViewType.Section,
+            find_any_view_of_type(document, DB.ViewType.Section)),
+        'view_3d': template_options_for(
+            all_templates, DB.ViewType.ThreeD,
+            find_any_view_of_type(document, DB.ViewType.ThreeD)),
     }
     if not any(template_options.values()):
         return {}
